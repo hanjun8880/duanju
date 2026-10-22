@@ -16,6 +16,10 @@ dependencies = [
     "scenedetect>=0.7.2",
     "faster-whisper>=1.2.1",
     "av>=11,<17",  # faster-whisper 1.2 calls av.open(metadata_errors=...), removed in av 17+
+    "celery>=5.6.3",
+    "redis>=8.1.0",
+    "opentimelineio>=0.18.1",
+    "python-multipart>=0.0.32",
 ]
 
 [dependency-groups]

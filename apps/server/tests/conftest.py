@@ -11,6 +11,8 @@ TEST_DB = os.environ.setdefault(
     "TEST_DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:5432/duanju_test"
 )
 os.environ["DATABASE_URL"] = TEST_DB  # app engine (src.db) must point at the test DB too
+os.environ.setdefault("DISPATCH_MODE", "inline")  # vendor dispatch in-process; queue tested in test_queue.py
+os.environ.setdefault("STORAGE_DIR", "/tmp/duanju-test-storage")
 
 
 @pytest.fixture(scope="session", autouse=True)

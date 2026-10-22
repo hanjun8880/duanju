@@ -84,7 +84,8 @@ async def create_job_with_prededuct(
                   request_payload=request_payload, credit_estimate=estimate, status="queued")
         session.add(job)
         await session.flush()
-        _post(session, user, job.id, -estimate, "pre_deduct")
+        if estimate:  # zero-credit local jobs leave no ledger noise
+            _post(session, user, job.id, -estimate, "pre_deduct")
     return job
 
 
@@ -127,7 +128,8 @@ async def refund_job(
         raise ValueError(f"bad terminal status {status}")
     async with session.begin():
         job, user = await _close_job(session, job_id)
-        _post(session, user, job.id, job.credit_estimate, reason)
+        if job.credit_estimate:
+            _post(session, user, job.id, job.credit_estimate, reason)
         job.actual_credits = Decimal(0)
         job.status = status
         job.error_message = error

@@ -37,10 +37,12 @@ def webhook_url(provider: str) -> str:
 
 
 async def create_job(session: AsyncSession, *, user_id: uuid.UUID, req: JobCreateRequest,
-                     model_key: str | None = None, failover_of: uuid.UUID | None = None) -> Job:
+                     model_key: str | None = None, failover_of: uuid.UUID | None = None,
+                     meta: dict[str, Any] | None = None) -> Job:
     task, canonical = preflight(req)
-    payload: dict[str, Any] = {"request": req.model_dump(mode="json"), "task_type": task, "canonical": canonical,
-                               "billable_units": req.billable_units(), "resolution": req.resolution}
+    payload: dict[str, Any] = {**(meta or {}), "request": req.model_dump(mode="json"), "task_type": task,
+                               "canonical": canonical, "billable_units": req.billable_units(),
+                               "resolution": req.resolution}
     if failover_of:
         payload["failover_of"] = str(failover_of)
     return await ledger.create_job_with_prededuct(
@@ -62,7 +64,9 @@ async def _failover(sm: async_sessionmaker[AsyncSession], job: Job, model: Model
         owner = (await s.execute(select(Project.user_id).where(Project.id == job.project_id))).scalar_one()
     req = JobCreateRequest.model_validate(job.request_payload["request"])
     async with sm() as s:
-        new = await create_job(s, user_id=owner, req=req, model_key=model.fallback_model_key, failover_of=job.id)
+        meta: dict[str, Any] = {k: job.request_payload[k] for k in ("render_tier", "chain") if k in job.request_payload}
+        new = await create_job(s, user_id=owner, req=req, model_key=model.fallback_model_key, failover_of=job.id,
+                               meta=meta)
     log.warning("failover %s -> %s (%s)", job.model_key, new.model_key, error)
     return await dispatch_job(sm, new.id, client)
 
@@ -123,6 +127,11 @@ async def handle_callback(sm: async_sessionmaker[AsyncSession], client: httpx.As
                        for kind, url in (("video", cb.video_url), ("last_frame", cb.last_frame_url)) if url]
             async with sm() as s:
                 await ledger.settle_job(s, job.id, actual, extra=outputs)
+            if job.shot_id and "render_tier" in job.request_payload:
+                from src.domains.storyboard.shot_orchestrator import on_shot_rendered
+                async with sm() as s:
+                    await on_shot_rendered(s, job.shot_id, job.request_payload["render_tier"], cb.last_frame_url,
+                                           bool(job.request_payload.get("chain")))
             return {"status": "success", "job_id": str(job.id), "actual_credits": str(actual)}
         await _refund(sm, job.id, "provider_5xx_refund", cb.error or "provider reported failure")
     except ledger.InvalidJobState:
