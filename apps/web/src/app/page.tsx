@@ -1,103 +1,71 @@
-import Image from "next/image";
+"use client";
+import { useEffect } from "react";
+import type { Me, Project } from "@/lib/contracts";
+import { useApi } from "@/lib/api";
+import { useWorkbench, type Tab } from "@/lib/store";
+import { ProjectImporter } from "@/features/project-importer/ProjectImporter";
+import { LookdevStudio } from "@/features/lookdev-studio/LookdevStudio";
+import { StoryboardCanvas } from "@/features/storyboard-canvas/StoryboardCanvas";
+import { AdminLedger } from "@/features/admin-ledger/AdminLedger";
 
-export default function Home() {
+const TABS: { id: Tab; label: string }[] = [
+  { id: "import", label: "剧本与导入" },
+  { id: "lookdev", label: "定妆" },
+  { id: "storyboard", label: "分镜长卷" },
+];
+
+export default function Workbench() {
+  const { projectId, setProject, tab, setTab, ledgerOpen, setLedgerOpen } = useWorkbench();
+  const projects = useApi<Project[]>("/projects");
+  const me = useApi<Me>("/me");
+  const current = projects.data?.find((p) => p.id === projectId) ?? null;
+
+  useEffect(() => {
+    if (!projectId && projects.data?.length) setProject(projects.data[0].id);
+  }, [projectId, projects.data, setProject]);
+
   return (
-    <div className="font-sans grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20">
-      <main className="flex flex-col gap-[32px] row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="font-mono list-inside list-decimal text-sm/6 text-center sm:text-left">
-          <li className="mb-2 tracking-[-.01em]">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] font-mono font-semibold px-1 py-0.5 rounded">
-              src/app/page.tsx
-            </code>
-            .
-          </li>
-          <li className="tracking-[-.01em]">
-            Save and see your changes instantly.
-          </li>
-        </ol>
-
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:w-auto"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 w-full sm:w-auto md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
+    <div className="min-h-screen">
+      <header className="border-b border-celadon-deep/60">
+        <div className="mx-auto flex max-w-[1400px] flex-wrap items-end gap-x-8 gap-y-3 px-4 pt-5 pb-3 sm:px-8">
+          <h1 className="text-3xl font-black tracking-[0.3em] text-ink">长卷</h1>
+          <div className="flex min-w-0 flex-1 items-center gap-3">
+            <label htmlFor="project" className="sr-only">当前剧集项目</label>
+            <select id="project" className="field max-w-xs" value={projectId ?? ""} onChange={(e) => setProject(e.target.value || null)}>
+              {!projects.data?.length && <option value="">还没有项目</option>}
+              {projects.data?.map((p) => <option key={p.id} value={p.id}>{p.title}</option>)}
+            </select>
+            {current?.content_mode === "uncensored_nsfw" && (
+              <span className="border border-seal px-2 py-0.5 text-sm text-seal" title="已确认 18+，仅限虚构成年角色">十八禁</span>
+            )}
+          </div>
+          <div className="flex items-center gap-4 text-sm text-ink-soft">
+            {me.data && <span>余额 <b className="text-lg text-ink">{Number(me.data.credits).toFixed(1)}</b> 积分，日限 {Number(me.data.daily_limit_credits).toFixed(0)}</span>}
+            <button className="btn btn-quiet" onClick={() => setLedgerOpen(true)}>账本与模型</button>
+          </div>
         </div>
+        <nav className="mx-auto flex max-w-[1400px] gap-6 px-4 sm:px-8" aria-label="工作区">
+          {TABS.map((t) => (
+            <button key={t.id} onClick={() => setTab(t.id)} aria-current={tab === t.id ? "page" : undefined}
+              className={`-mb-px border-b-2 pb-2 text-base ${tab === t.id ? "border-ink font-semibold text-ink" : "border-transparent text-ink-soft hover:text-ink"}`}>
+              {t.label}
+            </button>
+          ))}
+        </nav>
+      </header>
+
+      <main className="mx-auto max-w-[1400px] px-4 py-6 sm:px-8">
+        {projects.error && <p className="mb-4 text-seal">后端未连接：{projects.error}。请先启动 apps/server（uvicorn src.main:app）。</p>}
+        {tab === "import" && <ProjectImporter projects={projects.data ?? []} onChanged={() => { projects.reload(); me.reload(); }} />}
+        {tab === "lookdev" && (current ? <LookdevStudio project={current} /> : <NeedProject />)}
+        {tab === "storyboard" && (current ? <StoryboardCanvas project={current} onSpent={me.reload} /> : <NeedProject />)}
       </main>
-      <footer className="row-start-3 flex gap-[24px] flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
+
+      {ledgerOpen && <AdminLedger onClose={() => { setLedgerOpen(false); me.reload(); }} />}
     </div>
   );
+}
+
+function NeedProject() {
+  return <p className="text-ink-soft">先在「剧本与导入」里新建一个剧集项目。</p>;
 }

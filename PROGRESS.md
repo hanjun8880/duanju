@@ -51,5 +51,23 @@
 - 二创关键帧批量送 VLM 反推分镜未实现。
 - 依赖：`av<17`（faster-whisper 1.2 与 PyAV 17+ 不兼容）。
 
-## Phase 3 — 队列、前端导演工作台
-未开始。
+## Phase 3 — 队列、前端导演工作台（已完成）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| Celery 队列（high_priority / video.<model_key> / local_post），`DISPATCH_MODE=celery\|inline` | VERIFIED | `test_queue.py`：真实 Redis + 真实 worker 往返 |
+| 本地 L0 Animatic（FFmpeg 拼帧 + 中文字幕烧录） | VERIFIED | uvicorn + 真实 local_post worker 出片，抽帧检查中文字幕可见 |
+| 分镜编排：导入分镜、绑定定妆参考（≤30）、L1 minimax_h3 480p / L2 seedance 1080p + 尾帧接力、回调后挂接下一镜 | PASS | `test_orchestrator.py`、`test_workbench_api.py` |
+| 成片拼接（OTIO + concat） | PASS | `test_post.py` |
+| 4K 超分（Real-ESRGAN）、换脸（FACE_SWAP_CMD） | NOT_TESTED | 沙箱无二进制；缺失时返回 ToolMissing 并全额退款 |
+| 管理后台：模型价格/启停、任务监控、手动退款（二次 409）、重试、账本流水 | PASS | `test_workbench_api.py` |
+| 前端导演台（剧本导入 / 定妆 / 分镜长卷 / 账本与模型抽屉），宋式青瓷配色 | VERIFIED | Playwright 1440 桌面 + 390 移动端截图人工复核；无横向溢出、无 console 错误 |
+| 前端契约：Zod 与后端 openapi.json 字段/必填项一致；积分预估 | PASS | vitest 6 passed |
+| 真实供应商 / Claude / MinIO | BLOCKED | 无密钥、无 Docker 守护进程 |
+
+后端合计 87 passed；`ruff`、`mypy`、`pnpm tsc`、`pnpm build` 通过。
+
+### 未做
+- 二创关键帧批量送 VLM 反推分镜。
+- 用户鉴权（目前单一默认导演账号 `director`）。
+- S3/MinIO 预签名上传与素材转存（目前本地 `storage/` + `/media` 静态目录）。
