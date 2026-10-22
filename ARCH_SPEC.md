@@ -586,6 +586,6 @@ claude -p "Read @ARCH_SPEC.md and @CLAUDE.md. ultrathink and execute Phase 3 fol
 ## 落地核实附注（实现方补充，非原文）
 
 - Claude 模型：默认改用当前模型 ID（`claude-opus-5-5`，轻量任务 `claude-sonnet-5-5`），可通过环境变量覆盖；`claude-sonnet-4-6` 仍可配置但不再作为默认。
-- `output_config.format` / `cache_control.ttl="1h"` / 禁止 assistant prefill：已对照 Anthropic 官方 SDK 文档核实。
+- `output_config.format` / `cache_control.ttl="1h"` / 禁止 assistant prefill：已对照 Anthropic 官方 SDK 文档核实。注意 1h TTL 缓存写入价为基础输入价的 2 倍（+25% 是 5m TTL 的价格）。
 - 视频供应商（Seedance 2.5、Wan 3、MiniMax H3、Flux Uncensored 等）的模型名、字段名、端点、单价、30s/30 图上限均未能从官方文档核实，全部放在适配器层作为可配置项，标注 NOT_TESTED。
 - `.claude/settings.json` 中原文的 `$CLAUDE_FILE_PATHS` 不是 Claude Code 提供的变量（hook 通过 stdin JSON 接收 `tool_input.file_path`），已改为读取 stdin 的脚本实现，语义不变。

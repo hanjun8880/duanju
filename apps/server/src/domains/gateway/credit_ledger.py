@@ -5,17 +5,19 @@ transitions the job row first, then the user row (fixed lock order => no deadloc
 A job can leave queued/processing exactly once, which makes settle/refund idempotent and race-safe.
 """
 import uuid
+from collections.abc import Sequence
 from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.models import CreditLedger, Job, ModelCatalog, Project, User
+from src.models import Base, CreditLedger, Job, ModelCatalog, Project, User
 
 Q = Decimal("0.0001")
 OPEN_STATES = ("queued", "processing")
-REFUND_REASONS = {"provider_5xx_refund", "timeout_refund", "policy_reject_refund", "cancel_refund"}
+REFUND_REASONS = {"provider_5xx_refund", "provider_4xx_refund", "timeout_refund", "policy_reject_refund",
+                  "cancel_refund"}
 
 
 class LedgerError(Exception):
@@ -94,7 +96,9 @@ async def _close_job(session: AsyncSession, job_id: uuid.UUID) -> tuple[Job, Use
     return job, await _locked_user(session, owner)
 
 
-async def settle_job(session: AsyncSession, job_id: uuid.UUID, actual_credits: Decimal) -> Job:
+async def settle_job(session: AsyncSession, job_id: uuid.UUID, actual_credits: Decimal,
+                     extra: Sequence[Base] = ()) -> Job:
+    """extra: rows (e.g. output assets) committed atomically with the settlement."""
     actual = Decimal(actual_credits).quantize(Q)
     if actual < 0:
         raise ValueError("actual_credits must be >= 0")
@@ -106,6 +110,7 @@ async def settle_job(session: AsyncSession, job_id: uuid.UUID, actual_credits: D
         elif diff < 0:
             # provider already billed us; balance may go below zero and blocks the next pre-deduct
             _post(session, user, job.id, diff, "settle_extra_charge")
+        session.add_all(extra)
         job.actual_credits = actual
         job.status = "success"
         job.completed_at = func.now()
