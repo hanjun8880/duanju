@@ -52,3 +52,12 @@ m4/lt~obsolete.m4
 # can automatically generate from config.status script
 # (which is called by configure script))
 Makefile
+
+# Python / Node
+__pycache__/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+node_modules/
+.next/
