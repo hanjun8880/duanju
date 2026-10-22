@@ -1,12 +1,19 @@
 import uuid
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.deps import Session
+from src.deps import Http, Session
+from src.domains.gateway.schemas import JobCreateRequest, MultimodalRefs
 from src.models import LookdevAsset, Project, Template
+
+LOOKDEV_MODEL = "seedream_5_pro"
+TYPE_HINT = {"character": "人物定妆照，全身正面站姿，纯色浅灰背景，柔和棚拍光，面部清晰，服装道具细节完整",
+             "prop": "道具设定图，单件物品居中，纯色浅灰背景，柔和棚拍光，材质与细节清晰",
+             "scene": "场景设定图，无人物，电影级构图与光影，空间纵深清晰"}
 
 api = APIRouter(prefix="/api/v1")
 
@@ -39,6 +46,54 @@ async def create_asset(project_id: uuid.UUID, body: LookdevCreate, session: Sess
     await session.commit()
     await session.refresh(a)
     return asset_view(a)
+
+
+class LookdevPatch(BaseModel):
+    visual_prompt: str | None = Field(default=None, min_length=1)
+    ref_urls: list[str] | None = Field(default=None, max_length=10)
+    likeness_consent: bool | None = None
+
+
+@api.patch("/lookdev/{asset_id}")
+async def patch_asset(asset_id: uuid.UUID, body: LookdevPatch, session: Session) -> dict[str, Any]:
+    a = await session.get(LookdevAsset, asset_id)
+    if a is None:
+        raise HTTPException(404, "look-dev asset not found")
+    consent = body.likeness_consent if body.likeness_consent is not None else a.meta.get("likeness_consent", False)
+    if a.asset_type == "character" and body.ref_urls and not consent:
+        raise HTTPException(422, "character reference images require likeness_consent "
+                                 "(fictional synthetic character or full likeness authorization)")
+    if body.visual_prompt is not None:
+        a.visual_prompt = body.visual_prompt
+    if body.ref_urls is not None:
+        a.ref_urls = body.ref_urls
+    a.meta = {**a.meta, "likeness_consent": consent}
+    await session.commit()
+    await session.refresh(a)
+    return asset_view(a)
+
+
+@api.post("/lookdev/{asset_id}/generate", status_code=201)
+async def generate_ref(asset_id: uuid.UUID, session: Session, bg: BackgroundTasks, http: Http) -> dict[str, Any]:
+    """One reference still per call through the gateway (credits, safety, ledger). Result lands in ref_urls."""
+    from src.domains.gateway.api import job_view, submit
+    a = await session.get(LookdevAsset, asset_id)
+    if a is None:
+        raise HTTPException(404, "look-dev asset not found")
+    p = await session.get(Project, a.project_id)
+    assert p is not None
+    prompt = f"{a.name}：{a.visual_prompt}。{TYPE_HINT[a.asset_type]}。画幅 {p.aspect_ratio}。"
+    req = JobCreateRequest(project_id=a.project_id, task_type="image.t2i", model_key=LOOKDEV_MODEL, prompt=prompt,
+                           refs=MultimodalRefs(image_urls=list(a.ref_urls)[:1]))  # keep the look when re-rolling
+    job = await submit(req, session, bg, http, meta={"lookdev_id": str(asset_id)})
+    return job_view(job)
+
+
+async def on_lookdev_rendered(session: AsyncSession, asset_id: uuid.UUID, url: str) -> None:
+    async with session.begin():
+        a = await session.get(LookdevAsset, asset_id, with_for_update=True)
+        if a is not None:
+            a.ref_urls = [url, *a.ref_urls][:10]  # newest first: shots bind the first ref
 
 
 @api.get("/projects/{project_id}/lookdev")

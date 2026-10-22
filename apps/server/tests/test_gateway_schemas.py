@@ -71,7 +71,7 @@ def test_no_refs_routes_i2v_to_t2v_and_strips_omni():
 def test_multi_ref_sets_omni_and_arrays():
     task, payload = preflight(req(refs=MultimodalRefs(image_urls=["i1", "i2"], video_urls=["v1"])))
     assert task == "video.i2v"
-    assert payload["omni_reference_task_type"]
+    assert payload["omni_reference_task_type"] == "reference"  # Ark enum: auto|reference|edit|extend
     assert payload["reference_image_urls"] == ["i1", "i2"] and payload["reference_video_urls"] == ["v1"]
     assert "reference_audio_urls" not in payload and "first_frame_url" not in payload
 

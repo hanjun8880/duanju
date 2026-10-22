@@ -97,6 +97,19 @@ class LookdevAsset(Base):
     created_at: Mapped[datetime] = created()
 
 
+class Episode(Base):
+    __tablename__ = "episodes"
+    id: Mapped[uuid.UUID] = pk()
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"))
+    episode_number: Mapped[int]
+    title: Mapped[str] = mapped_column(String(255), server_default="")
+    synopsis: Mapped[str] = mapped_column(Text, server_default="")
+    source_segments: Mapped[list[Any]] = mapped_column(server_default="[]")
+    script_text: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), server_default="outlined")
+    created_at: Mapped[datetime] = created()
+
+
 class Shot(Base):
     __tablename__ = "shots"
     id: Mapped[uuid.UUID] = pk()

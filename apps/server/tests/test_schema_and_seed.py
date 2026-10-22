@@ -3,10 +3,10 @@ from sqlalchemy import inspect, text
 from src.models import Base
 
 TABLES = {"users", "model_catalog", "templates", "projects", "lookdev_assets",
-          "shots", "jobs", "assets", "credit_ledger"}
+          "shots", "jobs", "assets", "credit_ledger", "episodes"}
 
 
-async def test_nine_tables_exist_and_match_orm(engine):
+async def test_core_tables_exist_and_match_orm(engine):
     async with engine.connect() as conn:
         def cols(sync_conn):
             insp = inspect(sync_conn)
@@ -26,6 +26,9 @@ async def test_seed_models_and_fallbacks(engine):
         assert k in rows
     assert rows["seedance_2_5_spicy"] == "wan3_spicy"
     assert rows["wan3_spicy"] == "seedance_2_5_spicy"
+    async with engine.connect() as conn:
+        ark = (await conn.execute(text("SELECT model_key FROM model_catalog WHERE provider='ark'"))).scalars().all()
+    assert set(ark) == {"seedance_2_5_spicy", "seedance_2_5_draft", "seedream_5_pro"}
 
 
 async def test_seed_ten_templates_mixed_sfw_nsfw(engine):

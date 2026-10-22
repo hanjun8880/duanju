@@ -20,10 +20,25 @@ STORYBOARD = {"episode_title": "E1", "hook_summary": "h", "shots": [{
     "scene_name": "天台", "suggested_pose_template": "window silhouette"}]}
 
 
-def claude_response(text: str, stop_reason: str = "end_turn") -> dict:
-    return {"id": "msg_1", "type": "message", "role": "assistant", "model": "claude-opus-5-5",
-            "content": [{"type": "text", "text": text}], "stop_reason": stop_reason, "stop_sequence": None,
-            "usage": {"input_tokens": 10, "output_tokens": 10, "cache_read_input_tokens": 9000}}
+def claude_response(text: str, stop_reason: str = "end_turn") -> httpx2.Response:
+    """A real Messages API SSE stream (the engine streams so long novels don't hit request timeouts)."""
+    events = [
+        ("message_start", {"type": "message_start", "message": {
+            "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-opus-5-5", "content": [],
+            "stop_reason": None, "stop_sequence": None,
+            "usage": {"input_tokens": 10, "output_tokens": 1, "cache_read_input_tokens": 9000}}}),
+        ("content_block_start", {"type": "content_block_start", "index": 0,
+                                 "content_block": {"type": "text", "text": ""}}),
+        *[("content_block_delta", {"type": "content_block_delta", "index": 0,
+                                   "delta": {"type": "text_delta", "text": text[i:i + 50]}})
+          for i in range(0, len(text), 50)],
+        ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+        ("message_delta", {"type": "message_delta", "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+                           "usage": {"output_tokens": 10}}),
+        ("message_stop", {"type": "message_stop"}),
+    ]
+    body = "".join(f"event: {e}\ndata: {json.dumps(d, ensure_ascii=False)}\n\n" for e, d in events)
+    return httpx2.Response(200, content=body.encode(), headers={"content-type": "text/event-stream"})
 
 
 def make_claude(handler):
@@ -47,7 +62,7 @@ async def test_storyboard_request_shape_and_parse():
         seen["url"] = str(request.url)
         seen["headers"] = request.headers
         seen["body"] = json.loads(request.content)
-        return httpx2.Response(200, json=claude_response(json.dumps(STORYBOARD, ensure_ascii=False)))
+        return claude_response(json.dumps(STORYBOARD, ensure_ascii=False))
 
     llm = CachedDirectorLLM(client=make_claude(handler))
     out = await llm.compile_episode_storyboard("RULES", {"characters": []}, "第一章……")
@@ -66,7 +81,7 @@ async def test_storyboard_request_shape_and_parse():
 
 
 async def test_refusal_raises():
-    llm = CachedDirectorLLM(client=make_claude(lambda r: httpx2.Response(200, json=claude_response("", "refusal"))))
+    llm = CachedDirectorLLM(client=make_claude(lambda r: claude_response("", "refusal")))
     with pytest.raises(LLMRefused):
         await llm.compile_episode_storyboard("R", {}, "x")
 

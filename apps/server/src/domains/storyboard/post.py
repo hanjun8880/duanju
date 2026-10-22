@@ -61,24 +61,49 @@ def render_animatic(frames: list[dict[str, Any]], out: str, size: tuple[int, int
     return out
 
 
-def assemble_episode(clips: list[str], out: str, otio_path: str, name: str) -> str:
-    """Lossless-order episode cut: an OTIO timeline for NLE round-trip + an FFmpeg re-encoded master."""
-    tl = otio.schema.Timeline(name=name)
-    track = otio.schema.Track(name="V1")
-    tl.tracks.append(track)
-    for c in clips:
-        dur = probe_duration(c)
-        track.append(otio.schema.Clip(
-            name=Path(c).stem, media_reference=otio.schema.ExternalReference(target_url=c),
-            source_range=otio.opentime.TimeRange(otio.opentime.RationalTime(0, FPS),
-                                                 otio.opentime.RationalTime(round(dur * FPS), FPS))))
-    otio.adapters.write_to_file(tl, otio_path)
-    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
-        f.write("".join(f"file '{Path(c).resolve()}'\n" for c in clips))
-    try:
-        _ff(["-f", "concat", "-safe", "0", "-i", f.name, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", out])
-    finally:
-        os.unlink(f.name)
+SIZES = {"9:16": (1080, 1920), "16:9": (1920, 1080), "1:1": (1080, 1080), "4:3": (1440, 1080),
+         "3:4": (1080, 1440), "21:9": (2520, 1080)}
+
+
+def has_audio(path: str) -> bool:
+    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index",
+                          "-of", "csv=p=0", path], check=True, capture_output=True, text=True).stdout
+    return bool(out.strip())
+
+
+def normalize(src: str, out: str, size: tuple[int, int]) -> str:
+    """Same size / fps / pixel format / stereo track for every clip, so mixed vendor + animatic clips concat."""
+    w, h = size
+    vf = (f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
+          f"fps={FPS},format=yuv420p")
+    if has_audio(src):
+        io = ["-i", src, "-map", "0:v:0", "-map", "0:a:0"]
+    else:  # silent animatic: add a silent track so concat sees identical streams
+        io = ["-i", src, "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo", "-map", "0:v:0", "-map", "1:a",
+              "-shortest"]
+    _ff([*io, "-vf", vf, "-c:v", "libx264", "-crf", "18", "-c:a", "aac", "-ar", "44100", "-ac", "2", out])
+    return out
+
+
+def assemble_episode(clips: list[str], out: str, otio_path: str, name: str,
+                     size: tuple[int, int] = (1080, 1920)) -> str:
+    """Ordered episode (or whole-series) cut: an OTIO timeline for NLE round-trip + an FFmpeg master.
+    Every clip is normalized first because clips come from different vendors / the local animatic."""
+    with tempfile.TemporaryDirectory() as tmp:
+        norm = [normalize(c, str(Path(tmp) / f"{i:04d}.mp4"), size) for i, c in enumerate(clips)]
+        tl = otio.schema.Timeline(name=name)
+        track = otio.schema.Track(name="V1")
+        tl.tracks.append(track)
+        for c, n in zip(clips, norm, strict=True):
+            dur = probe_duration(n)
+            track.append(otio.schema.Clip(
+                name=Path(c).stem, media_reference=otio.schema.ExternalReference(target_url=str(Path(c).resolve())),
+                source_range=otio.opentime.TimeRange(otio.opentime.RationalTime(0, FPS),
+                                                     otio.opentime.RationalTime(round(dur * FPS), FPS))))
+        otio.adapters.write_to_file(tl, otio_path)
+        lst = Path(tmp) / "list.txt"
+        lst.write_text("".join(f"file '{n}'\n" for n in norm))
+        _ff(["-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", "-movflags", "+faststart", out])
     return out
 
 

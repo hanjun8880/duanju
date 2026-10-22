@@ -68,6 +68,10 @@ class JobCreateRequest(BaseModel):
         return self.duration
 
 
+# Ark omni_reference_task_type values: auto | reference | edit | extend
+OMNI = {"video.edit": "edit", "video.extend": "extend"}
+
+
 def preflight(req: JobCreateRequest) -> tuple[str, dict[str, Any]]:
     """Deterministic clean-up before any vendor call. Returns (effective task_type, canonical payload)."""
     task: str = req.task_type
@@ -80,7 +84,7 @@ def preflight(req: JobCreateRequest) -> tuple[str, dict[str, Any]]:
         p |= {"first_frame_url": req.first_frame_url, "last_frame_url": req.last_frame_url}
     elif req.refs.any():
         p |= {"reference_image_urls": req.refs.image_urls or None, "reference_video_urls": req.refs.video_urls or None,
-              "reference_audio_urls": req.refs.audio_urls or None, "omni_reference_task_type": "multi_reference"}
+              "reference_audio_urls": req.refs.audio_urls or None, "omni_reference_task_type": OMNI.get(task, "reference")}
     elif task == "video.i2v":
         task = "video.t2v"  # 空参考自动降级为纯文生视频
     return task, {k: v for k, v in p.items() if v is not None}

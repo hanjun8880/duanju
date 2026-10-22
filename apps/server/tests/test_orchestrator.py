@@ -4,6 +4,7 @@ from decimal import Decimal
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, text
 
+from src import media
 from src.domains.script.script_engine import EpisodeStoryboardOutput
 from src.domains.storyboard import shot_orchestrator as orch
 from src.main import app
@@ -56,7 +57,7 @@ async def test_tier_requests(sessionmaker, user_and_project):
     async with sessionmaker() as s:
         draft = await orch.shot_request(s, shots[0].id, "L1_draft")
         master = await orch.shot_request(s, shots[0].id, "L2_master")
-    assert (draft.resolution, draft.duration, draft.model_key) == ("480p", 5, "minimax_h3")
+    assert (draft.resolution, draft.duration, draft.model_key) == ("480p", 20, "seedance_2_5_draft")
     assert (master.resolution, master.duration, master.model_key) == ("1080p", 20, "seedance_2_5_spicy")
     assert master.prompt.startswith("[参考图1-3: 林晚 人物] [参考图4: 怀表 道具] [参考图5-6: 天台 场景]")
     assert master.return_last_frame is True and len(master.refs.image_urls) == 6
@@ -98,8 +99,11 @@ async def test_render_and_callback_propagates_last_frame(engine, sessionmaker, u
         assert r.status_code == 200 and r.json()["status"] == "success"
     async with sessionmaker() as s:
         rows = (await s.execute(select(Shot).where(Shot.project_id == pid).order_by(Shot.shot_order))).scalars().all()
-    assert rows[0].status == "rendered_L2_master" and rows[0].last_frame_url == "https://v/1_last.png"
-    assert rows[1].first_frame_url == "https://v/1_last.png"
+    # vendor URLs expire, so the chain uses our downloaded copy of the last frame
+    kept = rows[0].last_frame_url
+    assert rows[0].status == "rendered_L2_master" and kept.startswith("/media/renders/") and kept.endswith(".png")
+    assert media.local_path(kept) is not None
+    assert rows[1].first_frame_url == kept
     async with engine.connect() as conn:
         bal = (await conn.execute(text("SELECT credits FROM users WHERE id=:u"), {"u": uid})).scalar()
     assert bal == Decimal(1000) - Decimal(64)  # settled on actual 20s @1080p

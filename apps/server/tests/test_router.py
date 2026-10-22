@@ -47,7 +47,8 @@ async def vendor(engine, monkeypatch):
         monkeypatch.setenv(f"{p}_WEBHOOK_SECRET", SECRET)
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://workbench.example")
     async with engine.begin() as conn:
-        await conn.execute(text("UPDATE model_catalog SET api_base='http://seedance.test' "
+        # these tests exercise the generic signed-webhook HttpAdapter path, so pin the reseller-style provider
+        await conn.execute(text("UPDATE model_catalog SET api_base='http://seedance.test', provider='seedance' "
                                 "WHERE model_key='seedance_2_5_spicy'"))
         await conn.execute(text("UPDATE model_catalog SET api_base='http://wan.test' WHERE model_key='wan3_spicy'"))
     v = Vendor()
@@ -56,8 +57,8 @@ async def vendor(engine, monkeypatch):
     yield v, client
     app.dependency_overrides.clear()
     async with engine.begin() as conn:
-        await conn.execute(text("UPDATE model_catalog SET api_base='unconfigured://seedance' "
-                                "WHERE model_key='seedance_2_5_spicy'"))
+        await conn.execute(text("UPDATE model_catalog SET api_base='https://ark.cn-beijing.volces.com/api/v3', "
+                                "provider='ark' WHERE model_key='seedance_2_5_spicy'"))
         await conn.execute(text("UPDATE model_catalog SET api_base='unconfigured://wan' WHERE model_key='wan3_spicy'"))
 
 

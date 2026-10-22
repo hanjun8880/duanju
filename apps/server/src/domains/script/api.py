@@ -2,18 +2,27 @@ import asyncio
 import os
 import shutil
 import uuid
+from collections.abc import Awaitable
 from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, UploadFile
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
 from src.deps import Session, director
-from src.domains.script.script_engine import CachedDirectorLLM, EpisodeStoryboardOutput, LLMRefused
+from src.domains.script import series
+from src.domains.script.script_engine import (
+    CachedDirectorLLM,
+    EpisodeScript,
+    EpisodeStoryboardOutput,
+    LLMRefused,
+    SeriesPlan,
+)
 from src.domains.storyboard import shot_orchestrator as orch
-from src.models import Project
+from src.models import Episode, Job, LookdevAsset, Project, Shot
 
 api = APIRouter(prefix="/api/v1")
 
@@ -77,6 +86,7 @@ class StoryboardImport(BaseModel):
 async def import_storyboard(project_id: uuid.UUID, body: StoryboardImport, session: Session) -> dict[str, Any]:
     if await session.get(Project, project_id) is None:
         raise HTTPException(404, "project not found")
+    await _replaceable_shots(session, project_id, body.episode_number)
     await session.close()
     shots = await orch.import_storyboard(session, project_id, body.episode_number, body.storyboard)
     return {"created": len(shots)}
@@ -92,19 +102,42 @@ async def compile_storyboard(project_id: uuid.UUID, body: CompileRequest, sessio
     p = await session.get(Project, project_id)
     if p is None:
         raise HTTPException(404, "project not found")
-    if p.content_mode == "standard_sfw" and not os.environ.get("ANTHROPIC_API_KEY"):
-        raise HTTPException(503, "ANTHROPIC_API_KEY not configured on the server")
+    _need_llm(p)
     mode, bible = p.content_mode, p.series_bible_json
+    await _replaceable_shots(session, project_id, body.episode_number)
     await session.close()
-    try:
-        board = await CachedDirectorLLM().compile_episode_storyboard(DIRECTOR_RULES, bible, body.text,
-                                                                     content_mode=mode)
-    except LLMRefused as e:
-        raise HTTPException(422, f"model declined: {e}") from e
-    except RuntimeError as e:
-        raise HTTPException(503, str(e)) from e
+    board = await _llm(CachedDirectorLLM().compile_episode_storyboard(DIRECTOR_RULES, bible, body.text,
+                                                                      content_mode=mode))
     shots = await orch.import_storyboard(session, project_id, body.episode_number, board)
     return {"created": len(shots), "episode_title": board.episode_title, "hook_summary": board.hook_summary}
+
+
+def _need_llm(p: Project) -> None:
+    if p.content_mode == "standard_sfw" and not os.environ.get("ANTHROPIC_API_KEY"):
+        raise HTTPException(503, "ANTHROPIC_API_KEY not configured on the server")
+
+
+async def _llm[T](call: Awaitable[T]) -> T:
+    try:
+        return await call
+    except LLMRefused as e:
+        raise HTTPException(422, f"model declined: {e}") from e
+    except ValueError as e:  # truncated output / schema mismatch
+        raise HTTPException(422, str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(503, str(e)) from e
+
+
+async def _replaceable_shots(session: AsyncSession, project_id: uuid.UUID, episode: int) -> None:
+    """Re-storyboarding replaces an episode's shots, unless any of them already has a render job."""
+    ids = (await session.execute(select(Shot.id).where(Shot.project_id == project_id,
+                                                       Shot.episode_number == episode))).scalars().all()
+    if not ids:
+        return
+    if (await session.execute(select(Job.id).where(Job.shot_id.in_(ids)).limit(1))).first():
+        raise HTTPException(409, f"episode {episode} already has rendered shots; edit them instead of replacing")
+    await session.execute(delete(Shot).where(Shot.id.in_(ids)))
+    await session.commit()
 
 
 def _save(file: UploadFile, path: Path) -> None:
@@ -127,7 +160,6 @@ async def upload(file: UploadFile) -> dict[str, str]:
 
 class RemixRequest(BaseModel):
     video_path: str
-    episode_number: int = Field(default=1, ge=1)
 
 
 @api.post("/projects/{project_id}/remix", status_code=202)
@@ -138,5 +170,146 @@ async def remix(project_id: uuid.UUID, body: RemixRequest, session: Session) -> 
     src = Path(body.video_path).resolve()
     if root not in src.parents or not src.is_file():  # only files we stored ourselves
         raise HTTPException(422, "video_path must be a file returned by /uploads")
-    orch.enqueue_local("remix.deconstruct", str(project_id), str(src), body.episode_number)
+    orch.enqueue_local("remix.deconstruct", str(project_id), str(src))
     return {"queue": "local_post", "status": "queued"}
+
+
+
+class ProjectPatch(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    source_novel_text: str | None = None
+    aspect_ratio: Literal["9:16", "16:9", "1:1", "4:3", "3:4", "21:9"] | None = None
+
+
+@api.patch("/projects/{project_id}")
+async def patch_project(project_id: uuid.UUID, body: ProjectPatch, session: Session) -> dict[str, Any]:
+    p = await session.get(Project, project_id)
+    if p is None:
+        raise HTTPException(404, "project not found")
+    for k, v in body.model_dump(exclude_unset=True).items():
+        setattr(p, k, v)
+    await session.commit()
+    await session.refresh(p)
+    return project_view(p)
+
+
+def episode_view(e: Episode) -> dict[str, Any]:
+    return {"episode_number": e.episode_number, "title": e.title, "synopsis": e.synopsis,
+            "source_segments": e.source_segments, "script_text": e.script_text, "status": e.status}
+
+
+class PlanRequest(BaseModel):
+    episode_count: int | None = Field(default=None, ge=1, le=200)
+    replace: bool = False
+
+
+@api.post("/projects/{project_id}/plan", status_code=201)
+async def plan_series(project_id: uuid.UUID, body: PlanRequest, session: Session) -> dict[str, Any]:
+    """Source text -> locked series bible + look-dev cards + episode outlines (one LLM call)."""
+    p = await session.get(Project, project_id)
+    if p is None:
+        raise HTTPException(404, "project not found")
+    if not (p.source_novel_text or "").strip():
+        raise HTTPException(422, "import a novel, an idea or a remix video first")
+    try:
+        segments = series.split_source(p.source_novel_text or "")
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+    existing = (await session.execute(select(Episode).where(Episode.project_id == project_id))).scalars().all()
+    if existing and not body.replace:
+        raise HTTPException(409, "episodes already planned; pass replace=true to re-plan")
+    _need_llm(p)
+    mode = p.content_mode
+    await session.close()
+    plan: SeriesPlan = await _llm(CachedDirectorLLM().structured(
+        SeriesPlan, series.PLAN_RULES, {}, series.plan_prompt(segments, body.episode_count), mode, effort="high"))
+    async with session.begin():
+        p = await session.get(Project, project_id, with_for_update=True)
+        assert p is not None
+        p.series_bible_json, p.status = series.bible_from_plan(plan), "planned"
+        await session.execute(delete(Episode).where(Episode.project_id == project_id))
+        session.add_all([Episode(project_id=project_id, episode_number=o.episode_number, title=o.title,
+                                 synopsis=o.synopsis, source_segments=[i for i in o.source_segments
+                                                                       if 0 < i <= len(segments)])
+                         for o in plan.episodes])
+        have = set((await session.execute(select(LookdevAsset.name).where(
+            LookdevAsset.project_id == project_id))).scalars())
+        cards = [("character", c.name, c.role_tag, c.visual_prompt) for c in plan.characters] + \
+            [("prop", x.name, None, x.visual_prompt) for x in plan.props] + \
+            [("scene", x.name, None, x.visual_prompt) for x in plan.scenes]
+        session.add_all([LookdevAsset(project_id=project_id, asset_type=t, name=n, role_tag=r, visual_prompt=v,
+                                      meta={"likeness_consent": False, "from_plan": True})
+                         for t, n, r, v in cards if n not in have])
+    return {"title": plan.title, "logline": plan.logline, "episodes": len(plan.episodes),
+            "characters": len(plan.characters), "props": len(plan.props), "scenes": len(plan.scenes)}
+
+
+@api.get("/projects/{project_id}/episodes")
+async def list_episodes(project_id: uuid.UUID, session: Session) -> list[dict[str, Any]]:
+    return [episode_view(e) for e in (await session.execute(select(Episode).where(
+        Episode.project_id == project_id).order_by(Episode.episode_number))).scalars()]
+
+
+async def _episode(session: AsyncSession, project_id: uuid.UUID, n: int) -> Episode:
+    e = (await session.execute(select(Episode).where(Episode.project_id == project_id,
+                                                     Episode.episode_number == n))).scalar_one_or_none()
+    if e is None:
+        raise HTTPException(404, f"episode {n} not found")
+    return e
+
+
+class EpisodePatch(BaseModel):
+    title: str | None = None
+    synopsis: str | None = None
+    script_text: str | None = None
+
+
+@api.patch("/projects/{project_id}/episodes/{n}")
+async def patch_episode(project_id: uuid.UUID, n: int, body: EpisodePatch, session: Session) -> dict[str, Any]:
+    e = await _episode(session, project_id, n)
+    for k, v in body.model_dump(exclude_unset=True).items():
+        setattr(e, k, v)
+    await session.commit()
+    await session.refresh(e)
+    return episode_view(e)
+
+
+@api.post("/projects/{project_id}/episodes/{n}/script", status_code=201)
+async def write_script(project_id: uuid.UUID, n: int, session: Session) -> dict[str, Any]:
+    p = await session.get(Project, project_id)
+    if p is None:
+        raise HTTPException(404, "project not found")
+    e = await _episode(session, project_id, n)
+    prev = (await session.execute(select(Episode.synopsis).where(
+        Episode.project_id == project_id, Episode.episode_number == n - 1))).scalar_one_or_none()
+    _need_llm(p)
+    segments = series.split_source(p.source_novel_text or "")
+    prompt = series.script_prompt(episode_view(e), segments, prev)
+    mode, bible = p.content_mode, p.series_bible_json
+    await session.close()
+    out: EpisodeScript = await _llm(CachedDirectorLLM().structured(EpisodeScript, series.SCRIPT_RULES, bible,
+                                                                    prompt, mode))
+    async with session.begin():
+        e = await _episode(session, project_id, n)
+        e.script_text, e.status = out.script_text, "scripted"
+        e.title = e.title or out.episode_title
+    return episode_view(e)
+
+
+@api.post("/projects/{project_id}/episodes/{n}/storyboard", status_code=201)
+async def storyboard_episode(project_id: uuid.UUID, n: int, session: Session) -> dict[str, Any]:
+    """Screenplay (or the outline if no screenplay yet) -> shots bound to the look-dev references."""
+    p = await session.get(Project, project_id)
+    if p is None:
+        raise HTTPException(404, "project not found")
+    e = await _episode(session, project_id, n)
+    _need_llm(p)
+    text = e.script_text or f"第{n}集《{e.title}》大纲：{e.synopsis}"
+    mode, bible = p.content_mode, p.series_bible_json
+    await _replaceable_shots(session, project_id, n)
+    await session.close()
+    board = await _llm(CachedDirectorLLM().compile_episode_storyboard(DIRECTOR_RULES, bible, text, content_mode=mode))
+    shots = await orch.import_storyboard(session, project_id, n, board)
+    async with session.begin():
+        (await _episode(session, project_id, n)).status = "storyboarded"
+    return {"created": len(shots), "episode_title": board.episode_title, "hook_summary": board.hook_summary}
