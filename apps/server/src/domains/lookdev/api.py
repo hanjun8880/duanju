@@ -254,7 +254,8 @@ async def generate_ref(asset_id: uuid.UUID, session: Session, bg: BackgroundTask
         return {**job_view(hit), "cached": True, "kind": b.kind}
     req = JobCreateRequest(project_id=a.project_id, task_type="image.t2i", model_key=model, prompt=prompt,
                            refs=MultimodalRefs(image_urls=refs))
-    job = await submit(req, session, bg, http, meta={"lookdev_id": str(asset_id), "lookdev_kind": b.kind})
+    job = await submit(req, session, bg, http, meta={"lookdev_id": str(asset_id), "lookdev_kind": b.kind},
+                     force=b.force)  # a re-roll must also skip the gateway content-hash cache
     view = job_view(job)
     a = await get_asset(session, asset_id, lock=True)
     cache = {k: v for k, v in (a.meta.get("gen_cache") or {}).items() if k != key}

@@ -81,3 +81,20 @@ export function lookdevLock(id: string, urls: string[]) {
 export function lookdevUnlock(id: string, urls?: string[]) {
   return api<{ locked_ref_urls: string[] }>(`/lookdev/${id}/unlock`, { method: "POST", json: urls ? { urls } : {} });
 }
+
+// ---- ledger team: keyframes, stage routing, money (types live with the features until contracts regenerate) ----
+export const keyframeApi = {
+  generate: (shotId: string, force = false) => api(`/shots/${shotId}/keyframe${force ? "?force=true" : ""}`, { method: "POST" }),
+  generateEpisode: (projectId: string, n: number, onlyMissing = true) =>
+    api<{ jobs: unknown[]; skipped: string[]; error: string | null }>(`/projects/${projectId}/episodes/${n}/keyframes`,
+      { method: "POST", json: { only_missing: onlyMissing } }),
+  approve: (shotId: string) => api(`/shots/${shotId}/keyframe/approve`, { method: "POST" }),
+  reject: (shotId: string) => api(`/shots/${shotId}/keyframe/reject`, { method: "POST" }),
+};
+
+export const putStage = (body: { stage: string; model: string | null; resolution?: string | null; note?: string | null }) =>
+  api("/admin/stages", { method: "PUT", json: body });
+
+export const putBudget = (projectId: string, budgetUsd: string | null, episode?: number) =>
+  api(episode ? `/projects/${projectId}/episodes/${episode}/budget` : `/projects/${projectId}/budget`,
+    { method: "PUT", json: { budget_usd: budgetUsd } });
