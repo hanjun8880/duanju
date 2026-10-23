@@ -62,3 +62,22 @@ export function useBusySet<K>() {
   }, []);
   return { busy, run };
 }
+
+// --- look-dev (team/lookdev) ---
+export type LookdevKind = "portrait" | "turnaround" | "expressions" | "costume";
+export type LookdevJob = { id: string; status: string; credit_estimate: string; cached: boolean; kind: LookdevKind };
+export type LookdevEstimate = { kind: LookdevKind; images: number; usd: number; cached: boolean };
+
+export function lookdevGenerate(id: string, kind: LookdevKind = "portrait", note?: string, force = false) {
+  return api<LookdevJob>(`/lookdev/${id}/generate`, { method: "POST", json: { kind, note, force } });
+}
+export function lookdevEstimate(id: string, kind: LookdevKind, note?: string) {
+  const q = new URLSearchParams({ kind, ...(note ? { note } : {}) });
+  return api<LookdevEstimate>(`/lookdev/${id}/estimate?${q}`);
+}
+export function lookdevLock(id: string, urls: string[]) {
+  return api<{ locked_ref_urls: string[] }>(`/lookdev/${id}/lock`, { method: "POST", json: { urls } });
+}
+export function lookdevUnlock(id: string, urls?: string[]) {
+  return api<{ locked_ref_urls: string[] }>(`/lookdev/${id}/unlock`, { method: "POST", json: urls ? { urls } : {} });
+}
