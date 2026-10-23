@@ -260,3 +260,20 @@ async def test_remix_rewrite_is_ledgered_on_its_stage(sessionmaker, user_and_pro
     async with sessionmaker() as s:
         rows = (await s.execute(select(Job).where(Job.project_id == pid))).scalars().all()
     assert [r.task_type for r in rows] == ["llm.remix_rewrite"] and rows[0].model_key == "llm_remix_rewrite"
+
+
+# --- seam 10: main.py wires every team's router, the auth middleware and the stage-override loader ---
+
+async def test_main_wires_every_router_and_auth(monkeypatch):
+    from src import main
+    paths = set(app.openapi()["paths"])
+    for p in ("/api/v1/auth/login", "/api/v1/shots/{shot_id}/keyframe", "/api/v1/voice/preview",
+              "/api/v1/remix/fork", "/api/v1/admin/stages", "/api/v1/projects/{project_id}/costs",
+              "/api/v1/lookdev/{asset_id}/lock", "/api/v1/projects/{project_id}/plan/progress",
+              "/api/v1/shots/{shot_id}/select"):
+        assert p in paths, p
+    assert main.load_stage_overrides is not None
+    monkeypatch.setattr(settings, "app_token", "s3cret")
+    async with client() as c:
+        assert (await c.get("/api/v1/remix/projects/00000000-0000-0000-0000-000000000000/sources")).status_code == 401
+        assert (await c.get("/healthz")).status_code == 200

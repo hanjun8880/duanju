@@ -18,6 +18,8 @@ from typing import Any
 
 import cv2
 
+from src.config import settings
+
 THRESHOLD = 6  # max differing bits of 64 for "same picture"
 COLOUR_DELTA = 24.0  # mean BGR distance above which two frames differ even with equal dHash (flat frames)
 BATCH = 40  # images per vision request (well under the per-request image limit)
@@ -25,10 +27,9 @@ PER_SHOT_TEXT_TOKENS = 40  # "镜头 n（a-b s）台词：…" block
 PER_BATCH_TOKENS = 300  # system rules + closing instruction
 PER_SHOT_OUTPUT_TOKENS = 120  # one description
 MAX_LONG_EDGE, MAX_PIXELS = 1568, 1_150_000  # Claude downsizes larger images before counting tokens
-VISION_USD_PER_MTOK: dict[str, tuple[float, float]] = {  # (input, output) USD per 1M tokens, UNVERIFIED
-    "claude-sonnet-5-5": (3.0, 15.0),
-    "claude-opus-5-5": (5.0, 25.0),
-}
+# (input, output) USD per 1M tokens, UNVERIFIED: one price table for estimate and ledger (settings.llm_prices)
+VISION_USD_PER_MTOK: dict[str, tuple[float, float]] = {
+    m: (p.get("input", 0.0), p.get("output", 0.0)) for m, p in settings.llm_prices.items()}
 
 
 def _gray_small(path: str | Path, size: int) -> Any:
