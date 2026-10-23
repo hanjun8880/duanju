@@ -117,3 +117,19 @@
 - 网页正文抓取是启发式（按块级标签长度过滤导航/按钮文案），非完整 readability 算法；复杂排版页面可能需要手动贴正文兜底。
 - 「按原文整理成剧本」需要 ANTHROPIC_API_KEY；未配置时明确报错，不是静默失败。
 - 原片拆解用的 faster-whisper 模型较大时，在资源受限环境可能被系统杀进程；生产环境需要给 worker 预留足够内存。
+
+## 定妆组（team/lookdev）— 第二轮
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| P0：出图只进候选 `ref_urls`（上限 12，最新在前；裁剪时跳过被锁定的图），不再自动成为镜头参考，不写 `locked_ref_urls` | PASS | `test_lookdev.py::test_render_lands_in_candidates_not_locked`、`test_candidates_capped_at_12_and_locked_survive_trim` |
+| `POST /lookdev/{id}/lock {urls}`（≤3，须在 ref_urls 内）/ `POST /lookdev/{id}/unlock [{urls}]`；PATCH 删候选时同步去掉对应锁定；肖像授权校验保留 | PASS | `test_lock_and_unlock`、`test_patch_removing_a_candidate_drops_its_lock`、原 `test_workbench_api` 授权用例 |
+| `refs.py::refs_for_episode(session, asset, episode)`：分集造型（meta.looks 区间覆盖且 locked 非空）> 资产锁定 > ref_urls[:1]；`GET /lookdev/{id}/refs_for_episode?episode=&n=`；`PUT/DELETE /lookdev/{id}/looks/{name}` | PASS | `test_refs_for_episode_prefers_episode_look_then_lock_then_first`、`test_save_look_validates_against_candidates` |
+| generate 支持 kind=portrait/turnaround(单张三视图拼版)/expressions(四宫格)/costume(需 note)，每种一次调用；参考=锁定图（无锁定时只用用户上传图，不用渲染图）；模型=`model_for("lookdev_image")` | PASS | `test_generate_kinds_use_locked_refs_and_stage_model`、`test_generate_with_lock_sends_locked_refs` |
+| 去重：sha256(模型+prompt+排序参考) 存 meta.gen_cache，命中 queued/processing/success 的旧任务直接返回（200, cached=true）不提交；`force` 可强制重出；失败任务不算命中 | PASS | `test_generate_dedup_hits_cache_and_estimate`、`test_failed_job_is_not_a_cache_hit` |
+| `GET /lookdev/{id}/estimate?kind=` 返回 usd（默认 $0.03/张，环境变量 `LOOKDEV_USD_PER_IMAGE` 可改；命中缓存为 0） | PASS | 同上 |
+| 前端：候选网格、点图锁定 ≤3、套组按钮（定妆/三视图/表情/换装）、复用提示 | PASS（tsc + vitest `lock.test.ts`）；真机界面 NOT_TESTED | |
+| 真实 Seedream 出图 | BLOCKED | 无 ARK 密钥，仅传输层打桩 |
+
+改动的旧测试：`tests/test_ark.py::test_lookdev_generate_saves_image_into_refs` 追加断言 `locked_ref_urls == []` 并注释原因（审查 P0：渲染图不得再作为镜头参考）。
+接口约定：分镜/渲染侧取参考图应调用 `src.domains.lookdev.refs.refs_for_episode`，不要再读 `ref_urls[0]`（`storyboard/shot_orchestrator.py:34-36` 仍读 ref_urls，归渲染组改）。
