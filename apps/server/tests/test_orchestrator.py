@@ -12,7 +12,7 @@ from src.models import LookdevAsset, Shot
 from tests.test_router import SECRET, sign, vendor  # noqa: F401  (fixture reuse)
 
 BOARD = EpisodeStoryboardOutput.model_validate({"episode_title": "第一集", "hook_summary": "怀表停在六点", "shots": [
-    {"shot_order": 1, "shot_scale": "WS", "duration": 20, "camera_motion": "slow dolly in",
+    {"shot_order": 1, "shot_scale": "WS", "duration": 10, "camera_motion": "slow dolly in",
      "five_part_visual_prompt": "1.天台全景 2.推进 3.林晚转身 4.晨光变暖 5.定格怀表",
      "dialogue": "你终于来了。", "character_names": ["林晚"], "prop_names": ["怀表"], "scene_name": "天台",
      "suggested_pose_template": "window silhouette"},
@@ -49,6 +49,41 @@ async def test_import_storyboard_binds_assets_and_templates(sessionmaker, user_a
     assert first.dialogue_transcript == "你终于来了。"
 
 
+async def test_import_storyboard_writes_kind_continuity_and_speaker(sessionmaker, user_and_project):
+    _, pid = user_and_project
+    await seed_lookdev(sessionmaker, pid)
+    board = EpisodeStoryboardOutput.model_validate({"episode_title": "一", "hook_summary": "h", "shots": [
+        {"shot_order": i, "shot_scale": "MS", "duration": 6, "camera_motion": "static",
+         "five_part_visual_prompt": "p", "dialogue": d, "speaker": sp, "shot_kind": k, "continuous_from_prev": c,
+         "character_names": ["林晚"], "prop_names": [], "scene_name": "天台", "suggested_pose_template": ""}
+        for i, k, c, d, sp in ((1, "establishing", True, "", ""), (2, "dialogue", False, "你来了。", "林晚"),
+                               (3, "action", True, "", "沈舟"), (4, "insert", False, "嗯", "路人"))]})
+    async with sessionmaker() as s:
+        await orch.import_storyboard(s, pid, 1, board)
+    async with sessionmaker() as s:
+        rows = (await s.execute(select(Shot).where(Shot.project_id == pid).order_by(Shot.shot_order))).scalars().all()
+        ids = {a.name: a.id for a in (await s.execute(select(LookdevAsset).where(
+            LookdevAsset.project_id == pid))).scalars()}
+    assert [r.shot_kind for r in rows] == ["establishing", "dialogue", "action", "insert"]
+    assert [r.continuous_from_prev for r in rows] == [False, False, True, False]  # first shot has nothing before it
+    assert [r.speaker_asset_id for r in rows] == [None, ids["林晚"], ids["沈舟"], None]  # unknown name -> None
+
+
+def test_storyboard_shots_are_short_takes():
+    import pytest
+    from pydantic import ValidationError
+
+    from src.domains.script import api as script_api
+    from src.domains.script.script_engine import ShotSchema, user_prompt
+    base = {"shot_order": 1, "shot_scale": "MS", "camera_motion": "s", "five_part_visual_prompt": "p",
+            "dialogue": "", "character_names": [], "prop_names": [], "scene_name": "", "suggested_pose_template": ""}
+    assert ShotSchema.model_validate({**base, "duration": 10}).shot_kind == "dialogue"
+    with pytest.raises(ValidationError):
+        ShotSchema.model_validate({**base, "duration": 11})
+    assert "15-30" not in script_api.DIRECTOR_RULES and "15-30" not in user_prompt("x")
+    assert "4-8" in script_api.DIRECTOR_RULES
+
+
 async def test_tier_requests(sessionmaker, user_and_project):
     _, pid = user_and_project
     await seed_lookdev(sessionmaker, pid)
@@ -57,8 +92,8 @@ async def test_tier_requests(sessionmaker, user_and_project):
     async with sessionmaker() as s:
         draft = await orch.shot_request(s, shots[0].id, "L1_draft")
         master = await orch.shot_request(s, shots[0].id, "L2_master")
-    assert (draft.resolution, draft.duration, draft.model_key) == ("480p", 20, "seedance_2_5_draft")
-    assert (master.resolution, master.duration, master.model_key) == ("1080p", 20, "seedance_2_5_spicy")
+    assert (draft.resolution, draft.duration, draft.model_key) == ("480p", 10, "seedance_2_5_draft")
+    assert (master.resolution, master.duration, master.model_key) == ("1080p", 10, "seedance_2_5_spicy")
     assert master.prompt.startswith("[参考图1-3: 林晚 人物] [参考图4: 怀表 道具] [参考图5-6: 天台 场景]")
     assert master.return_last_frame is True and len(master.refs.image_urls) == 6
 

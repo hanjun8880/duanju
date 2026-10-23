@@ -6,6 +6,7 @@ import httpx2
 import pytest
 from anthropic import AsyncAnthropic
 
+from src.domains.gateway.routing import model_for
 from src.domains.script.script_engine import (
     CachedDirectorLLM,
     EpisodeStoryboardOutput,
@@ -15,7 +16,7 @@ from src.domains.script.script_engine import (
 )
 
 STORYBOARD = {"episode_title": "E1", "hook_summary": "h", "shots": [{
-    "shot_order": 1, "shot_scale": "MS", "duration": 15, "camera_motion": "dolly in",
+    "shot_order": 1, "shot_scale": "MS", "duration": 6, "camera_motion": "dolly in",
     "five_part_visual_prompt": "1..5", "dialogue": "你好", "character_names": ["林"], "prop_names": [],
     "scene_name": "天台", "suggested_pose_template": "window silhouette"}]}
 
@@ -66,9 +67,9 @@ async def test_storyboard_request_shape_and_parse():
 
     llm = CachedDirectorLLM(client=make_claude(handler))
     out = await llm.compile_episode_storyboard("RULES", {"characters": []}, "第一章……")
-    assert isinstance(out, EpisodeStoryboardOutput) and out.shots[0].duration == 15
+    assert isinstance(out, EpisodeStoryboardOutput) and out.shots[0].duration == 6
     body = seen["body"]
-    assert body["model"] == "claude-opus-5-5"
+    assert body["model"] == model_for("storyboard").model  # routed per stage, not hard-coded
     assert body["messages"][-1]["role"] == "user"  # no assistant prefill
     assert [b["cache_control"]["ttl"] for b in body["system"]] == ["1h", "1h"]
     fmt = body["output_config"]["format"]

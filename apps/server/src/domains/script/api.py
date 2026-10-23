@@ -28,7 +28,9 @@ api = APIRouter(prefix="/api/v1")
 
 DIRECTOR_RULES = (
     "你是连续剧分镜导演。按短剧节奏拆镜：前3秒强冲突钩子、中段情绪递进、结尾悬念卡点。"
-    "同场次连续动作优先合并为15-30秒单镜到底。five_part_visual_prompt 必须依次写：1起始构图 2摄影机运动 "
+    "每镜 4-8 秒为主，最长 10 秒；一段连续动作拆成几镜时，后续镜头标 continuous_from_prev=true（接上一镜尾帧）。"
+    "shot_kind 标 dialogue/action/establishing/insert；有台词时 speaker 填说话角色名。"
+    "five_part_visual_prompt 必须依次写：1起始构图 2摄影机运动 "
     "3主体连续动作与交互 4环境光影变化 5结束定格。角色、道具、场景名必须与 SERIES_BIBLE 中的名称完全一致。"
     "所有角色均为虚构成年人。"
 )
@@ -255,7 +257,7 @@ async def plan_series(project_id: uuid.UUID, body: PlanRequest, session: Session
     await session.close()
     plan: SeriesPlan = await _llm(CachedDirectorLLM().structured(
         SeriesPlan, series.PLAN_RULES, {}, series.plan_prompt(segments, body.episode_count, body.direction),
-        mode, effort="high"))
+        mode, effort="high", stage="plan"))
     async with session.begin():
         p = await session.get(Project, project_id, with_for_update=True)
         assert p is not None
@@ -311,7 +313,7 @@ async def import_script(project_id: uuid.UUID, body: ImportScriptRequest, sessio
         reformatted: list[str] = []
         for seg in segments:
             out: EpisodeScript = await _llm(CachedDirectorLLM().structured(
-                EpisodeScript, series.REFORMAT_RULES, {}, seg, mode))
+                EpisodeScript, series.REFORMAT_RULES, {}, seg, mode, stage="reformat"))
             reformatted.append(out.script_text)
         segments = reformatted
     else:
@@ -365,7 +367,7 @@ async def write_script(project_id: uuid.UUID, n: int, session: Session) -> dict[
     mode, bible = p.content_mode, p.series_bible_json
     await session.close()
     out: EpisodeScript = await _llm(CachedDirectorLLM().structured(EpisodeScript, series.SCRIPT_RULES, bible,
-                                                                    prompt, mode))
+                                                                    prompt, mode, stage="script"))
     async with session.begin():
         e = await _episode(session, project_id, n)
         e.script_text, e.status = out.script_text, "scripted"

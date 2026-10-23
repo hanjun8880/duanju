@@ -46,11 +46,14 @@ async def import_storyboard(session: AsyncSession, project_id: uuid.UUID, episod
         assets = {a.name: a for a in (await session.execute(
             select(LookdevAsset).where(LookdevAsset.project_id == project_id))).scalars()}
         templates = {t.pose.lower(): t.id for t in (await session.execute(select(Template))).scalars()}
+        speakers = {n: a.id for n, a in assets.items() if a.asset_type == "character"}
         shots = [Shot(project_id=project_id, episode_number=episode_number, shot_order=s.shot_order,
                       template_id=templates.get(s.suggested_pose_template.lower()), duration=s.duration,
                       shot_prompt=s.five_part_visual_prompt, dialogue_transcript=s.dialogue or None,
+                      shot_kind=s.shot_kind, continuous_from_prev=s.continuous_from_prev and i > 0,
+                      speaker_asset_id=speakers.get(s.speaker.strip()),
                       refs=_bind_refs([*s.character_names, *s.prop_names, s.scene_name], assets))
-                 for s in board.shots]
+                 for i, s in enumerate(board.shots)]
         session.add_all(shots)
     return shots
 

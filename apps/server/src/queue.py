@@ -173,7 +173,7 @@ def remix(project_id: str, video_path: str) -> int:
     import os
 
     from src.domains.script import series
-    from src.domains.script.script_engine import LIGHT_MODEL, CachedDirectorLLM, KeyframeNotes
+    from src.domains.script.script_engine import CachedDirectorLLM, KeyframeNotes
     from src.domains.script.video_remix import LocalVideoDeconstructor
     from src.models import Project
 
@@ -192,11 +192,11 @@ def remix(project_id: str, video_path: str) -> int:
             mode = p.content_mode
         notes: dict[int, str] = {}
         if mode == "standard_sfw" and os.environ.get("ANTHROPIC_API_KEY"):
-            llm = CachedDirectorLLM(model=LIGHT_MODEL)
+            llm = CachedDirectorLLM()
             for i in range(0, len(shots), 40):  # stay well under the per-request image limit
                 batch = shots[i:i + 40]
                 res = await llm.structured(KeyframeNotes, series.KEYFRAME_RULES, {}, series.keyframe_content(batch),
-                                           effort="low", max_tokens=16000)
+                                           effort="low", max_tokens=16000, stage="remix_vision")
                 notes |= {n.shot_order: n.description for n in res.shots}
         async with sm() as s, s.begin():
             p = await s.get(Project, uuid.UUID(project_id), with_for_update=True)
