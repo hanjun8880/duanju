@@ -14,6 +14,16 @@ def align_dialogue(transcript: list[dict[str, Any]], s_sec: float, e_sec: float)
     return " ".join(t["text"] for t in transcript if not (t["end"] <= s_sec or t["start"] >= e_sec))
 
 
+KEYFRAME_LONG_EDGE = 768  # ~440 vision tokens per frame instead of ~1500 at 1080x1920; plenty for description
+
+
+def extract_keyframe(video_path: str, t: float, out_file: str, long_edge: int = KEYFRAME_LONG_EDGE) -> None:
+    """One JPEG at t seconds, long edge capped (never upscaled), even dimensions kept for the encoder."""
+    scale = (f"scale='if(gte(iw,ih),min({long_edge},iw),-2)':'if(gte(iw,ih),-2,min({long_edge},ih))'")
+    subprocess.run(["ffmpeg", "-y", "-ss", str(t), "-i", video_path, "-frames:v", "1", "-vf", scale,
+                    "-q:v", "2", out_file], check=True, capture_output=True)
+
+
 class LocalVideoDeconstructor:
     def __init__(self, whisper_size: str = "large-v3", device: str = "auto", compute_type: str = "default"):
         # spec used cuda/float16; "auto"/"default" picks GPU fp16 when present, CPU int8/fp32 otherwise
@@ -40,8 +50,7 @@ class LocalVideoDeconstructor:
         for idx, (start_tc, end_tc) in enumerate(scene_list):
             s_sec, e_sec = start_tc.seconds, end_tc.seconds
             kf_file = out_path / f"shot_{idx:04d}_keyframe.jpg"
-            subprocess.run(["ffmpeg", "-y", "-ss", str((s_sec + e_sec) / 2.0), "-i", video_path, "-frames:v", "1",
-                            "-q:v", "2", str(kf_file)], check=True, capture_output=True)
+            extract_keyframe(video_path, (s_sec + e_sec) / 2.0, str(kf_file))
             shots.append({
                 "shot_order": idx + 1,
                 "start_time": round(s_sec, 2),
