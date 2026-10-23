@@ -187,10 +187,6 @@ async def next_shot_order(session: AsyncSession, project_id: uuid.UUID, episode:
 async def render_next(sm: async_sessionmaker[AsyncSession], client: httpx.AsyncClient, shot_id: uuid.UUID, tier: str,
                       chain: bool, final: bool = False) -> uuid.UUID | None:
     """Episode batch: after one shot finishes, queue the next (chained L2 must wait for the previous last frame)."""
-    from src.domains.gateway import router
-    from src.domains.gateway.credit_ledger import LedgerError
-    from src.domains.gateway.safety import ContentBlocked, check_prompt
-    from src.models import ModelCatalog, Project
     async with sm() as s:
         shot = await s.get(Shot, shot_id)
         assert shot is not None
@@ -199,21 +195,65 @@ async def render_next(sm: async_sessionmaker[AsyncSession], client: httpx.AsyncC
             Shot.shot_order > shot.shot_order).order_by(Shot.shot_order).limit(1))).scalar_one_or_none()
         if nxt is None:
             return None
+        nxt_id = nxt.id
+    return await _queue_shot(sm, client, nxt_id, tier, chain, final)
+
+
+async def _queue_shot(sm: async_sessionmaker[AsyncSession], client: httpx.AsyncClient, shot_id: uuid.UUID, tier: str,
+                      chain: bool, final: bool) -> uuid.UUID | None:
+    from src.domains.gateway import router
+    from src.domains.gateway.credit_ledger import LedgerError
+    from src.domains.gateway.safety import ContentBlocked, check_prompt
+    from src.models import ModelCatalog, Project
+    async with sm() as s:
+        shot = await s.get(Shot, shot_id)
+        assert shot is not None
         project = await s.get(Project, shot.project_id)
         assert project is not None
-        req = await shot_request(s, nxt.id, tier, chain=chain, final=final)
+        req = await shot_request(s, shot_id, tier, chain=chain, final=final)
         model = await s.get(ModelCatalog, req.model_key)
         assert model is not None
     try:
-        check_prompt(req.prompt, project.content_mode, context={"project_id": str(project.id), "shot_id": str(nxt.id)})
+        check_prompt(req.prompt, project.content_mode, context={"project_id": str(project.id), "shot_id": str(shot_id)})
+    except ContentBlocked as e:  # this shot can't render: skip its continuous run, carry on at the next cut
+        log.warning("batch: shot %s blocked: %s", shot_id, e)
+        return await on_render_failed(sm, client, shot_id, tier, chain=chain, final=final, batch=True)
+    try:
         async with sm() as s:
             job = await router.create_job(s, user_id=project.user_id, req=req,
                                           meta={"render_tier": tier, "chain": chain, "batch": True, "final": final})
-    except (ContentBlocked, LedgerError) as e:  # blocked prompt / out of credits: stop the batch quietly
-        log.warning("batch stopped at shot %s: %s", nxt.id, e)
+    except LedgerError as e:  # out of credits: stop the batch quietly
+        log.warning("batch stopped at shot %s: %s", shot_id, e)
         return None
     await router.queue_dispatch(sm, client, job, model.provider)
-    return nxt.id
+    return shot_id
+
+
+async def on_render_failed(sm: async_sessionmaker[AsyncSession], client: httpx.AsyncClient,
+                           shot_id: uuid.UUID, tier: str, chain: bool, final: bool = False,
+                           batch: bool = False) -> uuid.UUID | None:
+    """Mark a shot failed. In a batch, the continuous shots after it (they need its last frame) fail too, and the
+    batch resumes at the next non-continuous shot instead of stopping the whole episode."""
+    async with sm() as s, s.begin():
+        shot = await s.get(Shot, shot_id, with_for_update=True)
+        if shot is None:
+            return None
+        shot.status = "failed"
+        if not batch:
+            return None
+        later = (await s.execute(select(Shot).where(
+            Shot.project_id == shot.project_id, Shot.episode_number == shot.episode_number,
+            Shot.shot_order > shot.shot_order).order_by(Shot.shot_order))).scalars().all()
+        resume = None
+        for nxt in later:
+            if chain and nxt.continuous_from_prev:
+                nxt.status = "failed"
+                continue
+            resume = nxt.id
+            break
+    if resume is None:
+        return None
+    return await _queue_shot(sm, client, resume, tier, chain, final)
 
 
 TIER_RANK = {"L3_post": 4, "L2_master": 3, "L1_draft": 2, "L0_animatic": 1}

@@ -1,6 +1,7 @@
 import json
 from decimal import Decimal
 
+import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, text
 
@@ -66,6 +67,69 @@ async def test_tier_requests(sessionmaker, user_and_project):
     # 旧断言是导入时快照的全部 ref_urls（人物→道具→场景，共 6 张）。
     assert master.prompt.startswith("[参考图1: 林晚 人物] [参考图2: 天台 场景] [参考图3: 怀表 道具]")
     assert master.return_last_frame is True and len(master.refs.image_urls) == 3
+
+
+BOARD3 = EpisodeStoryboardOutput.model_validate({**BOARD.model_dump(), "shots": [
+    *BOARD.model_dump()["shots"],
+    {"shot_order": 3, "shot_scale": "MS", "duration": 6, "camera_motion": "pan",
+     "five_part_visual_prompt": "1.中景 2.摇 3.林晚离开 4.暮色 5.定格", "dialogue": "",
+     "character_names": ["林晚"], "prop_names": [], "scene_name": "天台", "suggested_pose_template": "none"}]})
+
+
+async def batch_shots(sessionmaker, pid):
+    async with sessionmaker() as s:
+        shots = await orch.import_storyboard(s, pid, 1, BOARD3)
+    async with sessionmaker() as s, s.begin():
+        second = await s.get(Shot, shots[1].id)
+        assert second is not None
+        second.continuous_from_prev = True  # 1->2 is one continuous take, 3 is a cut
+    return shots
+
+
+async def test_failed_chain_skips_to_next_cut(sessionmaker, user_and_project, monkeypatch):
+    _, pid = user_and_project
+    shots = await batch_shots(sessionmaker, pid)
+    queued = []
+
+    async def fake_queue(sm, client, shot_id, tier, chain, final):
+        queued.append((shot_id, tier, chain, final))
+        return shot_id
+    monkeypatch.setattr(orch, "_queue_shot", fake_queue)
+    resumed = await orch.on_render_failed(sessionmaker, None, shots[0].id, "L2_master", chain=True, batch=True)
+    assert resumed == shots[2].id and queued == [(shots[2].id, "L2_master", True, False)]
+    async with sessionmaker() as s:
+        rows = (await s.execute(select(Shot).where(Shot.project_id == pid).order_by(Shot.shot_order))).scalars().all()
+    assert [r.status for r in rows] == ["failed", "failed", "pending"]  # 2 needs 1's last frame
+
+
+async def test_batch_failover_keeps_batch_and_dead_vendors_resume_at_cut(
+        engine, sessionmaker, user_and_project, vendor, monkeypatch):  # noqa: F811
+    from src.domains.gateway import router
+    uid, pid = user_and_project
+    v, client = vendor
+    async with engine.begin() as conn:
+        await conn.execute(text("UPDATE users SET credits=1000, daily_limit_credits=1000 WHERE id=:u"), {"u": uid})
+    shots = await batch_shots(sessionmaker, pid)
+    queued = []
+
+    async def fake_queue(sm, client, shot_id, tier, chain, final):
+        queued.append(shot_id)
+        return shot_id
+    monkeypatch.setattr(orch, "_queue_shot", fake_queue)
+    meta = {"render_tier": "L2_master", "chain": True, "batch": True, "final": False}
+    async with sessionmaker() as s:
+        req = await orch.shot_request(s, shots[0].id, "L2_master")
+    v.behaviour["seedance.test"] = 503
+    async with sessionmaker() as s:
+        job = await router.create_job(s, user_id=uid, req=req, meta=meta)
+    moved = await router.dispatch_job(sessionmaker, job.id, client)
+    assert moved.model_key == "wan3_spicy" and moved.request_payload["batch"] is True
+    v.behaviour["wan.test"] = 500
+    async with sessionmaker() as s:
+        job2 = await router.create_job(s, user_id=uid, req=req, meta=meta)
+    with pytest.raises(router.ProviderUnavailable):
+        await router.dispatch_job(sessionmaker, job2.id, client)
+    assert queued == [shots[2].id]
 
 
 async def test_master_model_routed_by_shot_kind(sessionmaker, user_and_project, monkeypatch):
