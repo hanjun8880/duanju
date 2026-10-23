@@ -13,7 +13,7 @@ api = APIRouter(prefix="/api/v1/voice", tags=["voice"])
 
 
 class VoiceSettings(BaseModel):
-    provider: Literal["volc", "minimax", "local"]
+    provider: Literal["volc", "minimax", "qwen", "local"]
     voice_id: str = Field(default="", max_length=128)
     speed: float = Field(default=1.0, ge=0.5, le=2.0)
     emotion: str | None = Field(default=None, max_length=32)
@@ -24,7 +24,7 @@ class VoiceSettings(BaseModel):
 @api.get("/providers")
 async def list_providers() -> list[dict[str, Any]]:
     return [{"id": p, "configured": providers.configured(p),
-             "default_voice": providers.CONFIG[p]["default_voice"]} for p in ("volc", "minimax", "local")]
+             "default_voice": providers.CONFIG[p]["default_voice"]} for p in ("volc", "minimax", "qwen", "local")]
 
 
 @api.put("/characters/{asset_id}")

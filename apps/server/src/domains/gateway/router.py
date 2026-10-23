@@ -274,8 +274,10 @@ async def _after_success(sm: async_sessionmaker[AsyncSession], client: httpx.Asy
     p = job.request_payload
     if p.get("lookdev_id") and urls.get("image"):
         from src.domains.lookdev.api import on_lookdev_rendered
+        refs = (p.get("request") or {}).get("refs") or {}
+        pure_t2i = not (refs.get("image_urls") or refs.get("video_urls") or refs.get("audio_urls"))
         async with sm() as s:
-            await on_lookdev_rendered(s, uuid.UUID(p["lookdev_id"]), urls["image"])
+            await on_lookdev_rendered(s, uuid.UUID(p["lookdev_id"]), urls["image"], pure_t2i=pure_t2i)
     if p.get("keyframe_shot_id") and urls.get("image"):
         from src.domains.storyboard.keyframes import on_keyframe_rendered
         async with sm() as s:

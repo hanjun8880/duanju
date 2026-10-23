@@ -30,7 +30,8 @@ class Settings(BaseSettings):
     media_ticket_ttl: int = 12 * 3600  # seconds a login's /media cookie stays valid
     # TTS USD per spoken character, by provider. PLACEHOLDERS, not verified against vendor price lists; override
     # with env TTS_USD_PER_CHAR as JSON. Only cache misses are paid (and ledgered as task_type='tts' jobs).
-    tts_usd_per_char: dict[str, float] = {"volc": 0.00004, "minimax": 0.0001, "local": 0.0}
+    # qwen: 阿里 qwen-audio-3.1-tts-plus ≈2.8 元/万字（Victor 专家选型 2026-10-23 口头核实，未接官方价目页 API）
+    tts_usd_per_char: dict[str, float] = {"volc": 0.00004, "minimax": 0.0001, "qwen": 0.0000389, "local": 0.0}
 
 
 settings = Settings()

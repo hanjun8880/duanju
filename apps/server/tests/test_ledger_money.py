@@ -44,7 +44,7 @@ async def test_migration_seeds_usd_reference_prices_and_stage_table(engine):
                                         "WHERE table_name='stage_overrides'"))).scalars().all()
     assert usd["seedance_2_5_spicy"] == Decimal("0.2310") and usd["seedance_2_5_draft"] == Decimal("0.0920")
     assert usd["wan3_spicy"] == Decimal("0.0830") and usd["minimax_h3"] == Decimal("0.0800")
-    assert usd["seedream_5_pro"] == Decimal("0.0300")
+    assert usd["seedream_5_pro"] == Decimal("0.0417")
     assert {"stage", "model", "provider", "resolution", "note"} <= set(cols)
 
 
@@ -213,8 +213,8 @@ async def test_episode_estimate_follows_stage_routing(engine, user_and_project, 
         e = (await c.get(f"/api/v1/projects/{pid}/episodes/1/estimate")).json()
         assert [s["model_key"] for s in e["shots"]] == ["seedance_2_5_spicy", "wan3_spicy"]
         assert e["usd"] == "1.5700"  # 0.231*5 + 0.083*5
-        assert e["keyframes"] == {"count": 2, "model_key": "seedream_5_pro", "usd": "0.0600"}
-        assert e["total_usd"] == "1.6300" and Decimal(e["credits"]) > 0
+        assert e["keyframes"] == {"count": 2, "model_key": "seedream_5_pro", "usd": "0.0834"}
+        assert e["total_usd"] == "1.6534" and Decimal(e["credits"]) > 0
         fin = (await c.get(f"/api/v1/projects/{pid}/episodes/1/estimate", params={"final": "true"})).json()
         assert {s["resolution"] for s in fin["shots"]} == {"1080p"} and fin["usd"] == "5.6900"
         d = (await c.get(f"/api/v1/projects/{pid}/episodes/1/estimate", params={"tier": "L1_draft"})).json()

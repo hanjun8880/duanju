@@ -66,6 +66,39 @@ async def test_openai_compat_stage_goes_to_chat_completions(monkeypatch):
                           "usage": {"input_tokens": 120, "output_tokens": 30}}]
 
 
+async def test_named_vendor_stage_goes_to_its_own_base_url(monkeypatch):
+    """A stage routed to a named vendor (e.g. doubao/zhipu/moonshot) hits that vendor's own base URL with its
+    own API key env var, not the generic OPENAI_COMPAT_* pair."""
+    monkeypatch.setenv("PROVIDER_SUMMARIZE", "zhipu")
+    monkeypatch.setenv("MODEL_SUMMARIZE", "glm-5.3")
+    monkeypatch.setenv("ZHIPU_API_KEY", "zk")
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"], seen["auth"] = str(request.url), request.headers.get("authorization")
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(SCRIPT)}}],
+                                         "usage": {"prompt_tokens": 10, "completion_tokens": 5}})
+
+    from src.domains.script import script_engine
+    from src.domains.script.script_engine import VENDOR_BASE_URL
+    monkeypatch.setattr(script_engine, "httpx",
+                       type("M", (), {"AsyncClient": lambda *a, **kw: httpx.AsyncClient(
+                           transport=httpx.MockTransport(handler))})())
+    llm = CachedDirectorLLM(client=make_claude(lambda r: (_ for _ in ()).throw(AssertionError("no Claude"))))
+    out = await llm.structured(EpisodeScript, "R", {}, "x", stage="summarize")
+    assert out.script_text == "场1"
+    assert seen["url"] == VENDOR_BASE_URL["zhipu"] + "/v1/chat/completions" and seen["auth"] == "Bearer zk"
+    assert llm.calls[0]["provider"] == "zhipu" and llm.calls[0]["model"] == "glm-5.3"
+
+
+async def test_named_vendor_without_key_is_blocked(monkeypatch):
+    monkeypatch.setenv("PROVIDER_SUMMARIZE", "zhipu")
+    monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
+    llm = CachedDirectorLLM(client=make_claude(lambda r: claude_response("{}")))
+    with pytest.raises(RuntimeError, match="ZHIPU_API_KEY"):
+        await llm.structured(EpisodeScript, "R", {}, "x", stage="summarize")
+
+
 async def test_openai_compat_without_endpoint_is_blocked(monkeypatch):
     monkeypatch.setenv("PROVIDER_SUMMARIZE", "openai_compat")
     monkeypatch.delenv("OPENAI_COMPAT_BASE_URL", raising=False)

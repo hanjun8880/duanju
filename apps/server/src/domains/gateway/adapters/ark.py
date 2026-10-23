@@ -26,6 +26,11 @@ MODELS: dict[str, tuple[str, dict[str, Any]]] = {
     "seedance_2_5_spicy": ("doubao-seedance-2-5-260628", {}),
     "seedance_2_5_draft": ("doubao-seedance-2-5-260628", {"draft": True}),  # 样片模式: 480p only
     "seedream_5_pro": ("doubao-seedream-5-0-pro-260628", {}),
+    # 专家选型 2026-10-23（Victor 核实价目页，口头汇报）：主力视频用 2.0 mini 省成本，关键帧用 seedream flash
+    # 更便宜。model id 已对着账号 GET /models 核实存在（2026-10-23），仍可用 ARK_MODEL_<KEY> 覆盖。
+    "seedance_2_0_mini": ("doubao-seedance-2-0-mini-260615", {}),
+    "seedance_2_0_mini_draft": ("doubao-seedance-2-0-mini-260615", {"draft": True}),
+    "seedream_5_flash": ("doubao-seedream-5-0-flash-260915", {}),
 }
 DONE = {"succeeded", "failed", "expired", "cancelled"}
 

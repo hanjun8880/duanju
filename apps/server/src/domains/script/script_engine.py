@@ -142,6 +142,22 @@ def user_prompt(episode_raw_text: str) -> str:
     return f"将以下剧本拆解为连续剧分镜表（每镜 4-8 秒为主，最长 10 秒）：\n{episode_raw_text}"
 
 
+# 国产文本模型默认走的 OpenAI-compatible 网关：专家选型 2026-10-23 口头核实价格，接口文档未核实（NOT_TESTED）。
+# base_url 可用 <PROVIDER>_BASE_URL 覆盖；api_key 环境变量名见下。doubao 复用方舟账号自己的 ARK_API_KEY。
+VENDOR_BASE_URL = {
+    "doubao": "https://ark.cn-beijing.volces.com/api/v3",
+    "zhipu": "https://open.bigmodel.cn/api/paas/v4",
+    "moonshot": "https://api.moonshot.cn/v1",
+    "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "deepseek": "https://api.deepseek.com/v1",
+    "xai": "https://api.x.ai/v1",  # Grok：偏海外题材剧本的可选项，默认分工不用，按项目/档位手动选
+}
+VENDOR_API_KEY_ENV = {
+    "doubao": "ARK_API_KEY", "zhipu": "ZHIPU_API_KEY", "moonshot": "MOONSHOT_API_KEY",
+    "qwen": "QWEN_API_KEY", "deepseek": "DEEPSEEK_API_KEY", "xai": "XAI_API_KEY",
+}
+
+
 class OpenAICompatLLM:
     """Any OpenAI-compatible /v1/chat/completions endpoint (NOT_TESTED against a live server)."""
 
@@ -156,6 +172,15 @@ class OpenAICompatLLM:
     def from_env(cls) -> "OpenAICompatLLM | None":
         url = os.environ.get("OPENAI_COMPAT_BASE_URL")
         return cls(url, api_key=os.environ.get("OPENAI_COMPAT_API_KEY")) if url else None
+
+    @classmethod
+    def for_vendor(cls, provider: str) -> "OpenAICompatLLM | None":
+        """A named vendor (doubao/zhipu/moonshot/qwen/deepseek) with its own base URL + API key env var,
+        overridable per vendor with <PROVIDER>_BASE_URL. Missing key -> None (caller falls back/errors)."""
+        base = os.environ.get(f"{provider.upper()}_BASE_URL", VENDOR_BASE_URL.get(provider))
+        key_env = VENDOR_API_KEY_ENV.get(provider)
+        key = os.environ.get(key_env) if key_env else None
+        return cls(base, api_key=key) if base and key else None
 
     async def structured(self, out: type[T], system_rules: str, series_bible: dict[str, Any], prompt: str,
                          model: str | None = None) -> T:
@@ -218,14 +243,16 @@ class CachedDirectorLLM:
             return res
         routed = model_for(stage)
         use_model = model or self.model or routed.model
-        if routed.provider == "openai_compat":
-            compat = self.compat or OpenAICompatLLM.from_env()
+        if routed.provider != "anthropic":
+            compat = self.compat or OpenAICompatLLM.from_env() if routed.provider == "openai_compat" \
+                else OpenAICompatLLM.for_vendor(routed.provider)
             if compat is None:
-                raise RuntimeError(f"stage {stage} routes to openai_compat: set OPENAI_COMPAT_BASE_URL")
+                env_hint = VENDOR_API_KEY_ENV.get(routed.provider, "OPENAI_COMPAT_BASE_URL/OPENAI_COMPAT_API_KEY")
+                raise RuntimeError(f"stage {stage} routes to {routed.provider}: set {env_hint}")
             if not isinstance(prompt, str):
-                raise RuntimeError("the openai_compat path is text-only")
+                raise RuntimeError(f"the {routed.provider} path is text-only")
             res = await compat.structured(out, system_rules, series_bible, prompt, model=use_model)
-            self._record(stage, use_model, "openai_compat", compat.last_usage)
+            self._record(stage, use_model, routed.provider, compat.last_usage)
             return res
         schema = _SCHEMAS.setdefault(out, transform_schema(out))
         messages: list[Any] = [{"role": "user", "content": prompt}]

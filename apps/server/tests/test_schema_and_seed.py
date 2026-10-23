@@ -28,7 +28,8 @@ async def test_seed_models_and_fallbacks(engine):
     assert rows["wan3_spicy"] == "seedance_2_5_spicy"
     async with engine.connect() as conn:
         ark = (await conn.execute(text("SELECT model_key FROM model_catalog WHERE provider='ark'"))).scalars().all()
-    assert set(ark) == {"seedance_2_5_spicy", "seedance_2_5_draft", "seedream_5_pro"}
+    assert set(ark) == {"seedance_2_5_spicy", "seedance_2_5_draft", "seedream_5_pro",
+                        "seedance_2_0_mini", "seedance_2_0_mini_draft", "seedream_5_flash"}
 
 
 async def test_seed_ten_templates_mixed_sfw_nsfw(engine):

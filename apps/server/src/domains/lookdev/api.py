@@ -43,7 +43,8 @@ class LookdevCreate(BaseModel):
 def asset_view(a: LookdevAsset) -> dict[str, Any]:
     return {"id": str(a.id), "asset_type": a.asset_type, "name": a.name, "role_tag": a.role_tag,
             "visual_prompt": a.visual_prompt, "ref_urls": a.ref_urls, "locked_ref_urls": a.locked_ref_urls,
-            "meta": {k: v for k, v in a.meta.items() if k != "gen_cache"}}
+            "meta": {k: v for k, v in a.meta.items() if k not in ("gen_cache", "ref_meta")},
+            "ref_meta": a.meta.get("ref_meta") or {}}
 
 
 async def get_asset(session: AsyncSession, asset_id: uuid.UUID, lock: bool = False) -> LookdevAsset:
@@ -275,9 +276,15 @@ async def estimate(asset_id: uuid.UUID, session: Session, kind: Kind = "portrait
     return {"kind": kind, "images": 1, "usd": 0 if cached else round(usd_per_image(), 4), "cached": cached}
 
 
-async def on_lookdev_rendered(session: AsyncSession, asset_id: uuid.UUID, url: str) -> None:
+REF_VALID_DAYS = 30  # Seedance 拒收真人照片当参考图；纯文生图（无参考）的脸只在方舟账号内这么多天内保证可用
+
+
+async def on_lookdev_rendered(session: AsyncSession, asset_id: uuid.UUID, url: str, *, pure_t2i: bool = False) -> None:
     """A finished render is a *candidate*: newest first, ≤12, never auto-locked. Trimming drops the oldest
-    candidates that no lock (asset or per-episode look) points at."""
+    candidates that no lock (asset or per-episode look) points at.
+    pure_t2i: generated with zero image references (Seedream text-only), so lookdev/refs.py can expire it after
+    REF_VALID_DAYS instead of letting a stale face keep getting bound to new Seedance video jobs."""
+    from datetime import UTC, datetime, timedelta
     async with session.begin():
         a = await session.get(LookdevAsset, asset_id, with_for_update=True)
         if a is None:
@@ -291,6 +298,11 @@ async def on_lookdev_rendered(session: AsyncSession, asset_id: uuid.UUID, url: s
             if refs[i] not in pinned:
                 del refs[i]
         a.ref_urls = refs[:MAX_CANDIDATES] if len(refs) > MAX_CANDIDATES else refs
+        ref_meta = dict(a.meta.get("ref_meta") or {})
+        ref_meta[url] = {"pure_t2i": pure_t2i,
+                         "expires_at": (datetime.now(UTC) + timedelta(days=REF_VALID_DAYS)).isoformat()
+                         if pure_t2i else None}
+        a.meta = {**a.meta, "ref_meta": {u: m for u, m in ref_meta.items() if u in a.ref_urls}}
 
 
 @api.get("/projects/{project_id}/lookdev")

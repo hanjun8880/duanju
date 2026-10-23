@@ -292,3 +292,64 @@
 - 动画样片（L0）仍用导入时快照的 `refs.images[0]`，不走迟绑定（免费本地出图，不影响付费参考）。
 - compose worker 只监听 seedance/wan 视频队列；若在模型分工里把某环节改成 minimax_h3，需要给 worker 加 `video.minimax_h3`。
 - TTS / LLM / Seedance 等单价都是占位或第三方参考价，未核实。
+
+## 国产模型分工（2026-10-23，接在 hark/base 之后）
+
+Victor 嫌 Claude 贵、担心中文效果，拉了"七个专家窗口"按岗位选型，口头核实过官方价目页（细节报告待补）。这一轮把
+调用链路打通，但**没有改 `routing.py` 里硬编码的默认分工**——原因见下面"为什么没切默认值"。
+
+### 专家选型结论（Victor 提供，未独立核实）
+
+| 岗位 | 推荐模型 | 参考单价 |
+|---|---|---|
+| 整剧规划（读整本小说） | GLM-5.3（质量上限换 Kimi K3） | ~3.4 元/本 |
+| 分集剧本 | Kimi K3 / GLM-5.3 | ~0.3 元/集 |
+| 分镜表 / 定妆提示词 | 豆包 doubao-seed-2.1-lite（支持结构化 JSON） | ~0.02 元/集 |
+| 二创看片 | 豆包 doubao-seed-2.1-lite（直接读视频） | 同上 |
+| 摘要/拆书 | qwen3.7-flash（空闲时段 DeepSeek Flash） | — |
+| 定妆图 | Seedream 5.0 pro | 0.30 元/张 |
+| 关键帧 | Seedream 5.0 flash | 0.12 元/张 |
+| 主力视频 | Seedance 2.0 mini 720p（草稿 480p；重点镜头 2.0/2.5） | ~2.5 元/5秒（草稿 ~1.2 元/5秒） |
+| 空镜/过场 | 万相 wan2.2-i2v-flash 480p | 0.5 元/条 |
+| 打戏 | 可灵 4.0（**系统里还没有密钥/接口验证**） | — |
+| 配音 | 阿里 qwen-audio-3.1-tts-plus（虚构角色复刻免费） | ~2.8 元/万字 |
+| 配乐音效 | 火山 seed-audio-1.0 | 1 元/分钟 |
+
+两条硬约束：Seedance 拒收真人照片当参考图，定妆必须用 Seedream 纯文生图出脸；国内外平台都不接受露骨内容，真正卡人的是播出平台审片。
+
+### 已打通（VERIFIED / PASS）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| `script_engine.OpenAICompatLLM.for_vendor(provider)`：doubao（复用 `ARK_API_KEY`）/zhipu/moonshot/qwen/deepseek/xai(Grok) 六个 vendor，各自 base URL 可用 `<PROVIDER>_BASE_URL` 覆盖，`CachedDirectorLLM.structured()` 按 `routing.model_for(stage).provider` 自动分发 | PASS | `test_llm_routing.py::test_named_vendor_stage_goes_to_its_own_base_url`、`test_named_vendor_without_key_is_blocked` |
+| qwen 配音适配器（DashScope，字段 UNVERIFIED） | PASS（桩）/ 真实调用 NOT_TESTED（无 QWEN_API_KEY） | `voice/providers.py` |
+| 可灵(keling) 视频适配器占位：`model_catalog` 行 `is_active=false`，没有 `KELING_API_KEY` 时 `ProviderNotConfigured`，和 wan/minimax 的占位模式一致 | PASS | `adapters/keling.py` |
+| migration `0010_vendor_lineup`：新增 `seedance_2_0_mini`(_draft)、`seedream_5_flash`、`wan2_2_i2v_flash`、`keling_4_0`（inactive）；`seedream_5_pro` 单价从占位 0.03 改成 Victor 核实的 0.30 元/张 ≈ 0.0417 美元 | VERIFIED | `alembic upgrade head` 在空库跑通；`test_schema_and_seed.py`、`test_ledger_money.py` |
+| 定妆纯文生图标记 + 30 天有效期：`on_lookdev_rendered(..., pure_t2i=)` 把没有图片参考的渲染打上 `meta.ref_meta[url] = {pure_t2i, expires_at}`；`lookdev/refs.py` 的 `refs_for_episode` 过滤掉过期的 | PASS | `test_lookdev.py::test_pure_t2i_ref_expires_and_is_dropped_from_refs_for_episode` |
+| 真实供应商校准（只各打一次，按要求不多出）：Seedream 5.0 pro 文生图成功（2496×1664，usage.output_tokens=16224）；Seedance 2.0 mini 5 秒视频被方舟内容策略判定 `OutputVideoSensitiveContentDetected.PolicyViolation` 拒绝（和价格无关），没有重试 | VERIFIED（图）/ BLOCKED（视频，内容策略，非供应商问题） | 本轮会话记录；没有留存密钥/日志 |
+| 顺带修正：之前按专家口述写的几个 Ark 模型 id 是猜的，`GET /models` 核对账号真实可用 id 后全部改成真实值（如 `doubao-seedance-2-0-mini-260615`、`doubao-seedream-5-0-flash-260915`、`doubao-seed-2-1-lite-260915`） | VERIFIED | 同上 |
+
+后端 258 passed（新增 1 项 `test_lookdev`，`test_llm_routing` 新增 2 项抵消了同名旧文件的基线差）；`ruff`、`mypy`（53 个源文件）通过。
+
+### 为什么没把 `routing.py` 的默认分工直接改成专家选型
+
+试过了：把 `STAGES` 里 plan/script/storyboard/reformat/remix_vision/remix_rewrite 的默认模型/provider 从 Claude
+改成 GLM-5.3/Kimi K3/豆包后，整个仓库里几十个测试（`test_llm_ledger.py`、`test_script_engine.py`、
+`test_two_stage_plan.py`、`test_remix_modes.py`、`test_series.py` 等）全部是拿 Claude SSE mock 死死钉住这几个
+stage 默认值的，一次性改掉默认值会连带改掉一大批测试的桩，风险和这次改动的诉求（省钱）不成比例，容易改出真的 bug
+却被测试的"修复"掩盖。改为推荐：真要切换，在部署环境设 `MODEL_<STAGE>`/`PROVIDER_<STAGE>`（例如
+`MODEL_PLAN=glm-5.3 PROVIDER_PLAN=zhipu MODEL_SCRIPT=kimi-k3 PROVIDER_SCRIPT=moonshot
+MODEL_STORYBOARD=doubao-seed-2-1-lite-260915 PROVIDER_STORYBOARD=doubao`），或调用已有的
+`PUT /api/v1/admin/stages` 按 stage 持久化覆盖，效果等价，但不碰测试基线。
+
+### 已知限制 / 待办
+
+- 价目表里的 GLM-5.3/Kimi K3/doubao-seed-2.1-lite/qwen3.7-flash/wan2.2-i2v-flash/qwen-audio-3.1-tts-plus/
+  seed-audio-1.0 都是 Victor 口头核实的参考价，没有独立核对官方价目页 API；`settings.llm_prices` 没加这几个
+  模型的每百万 token 单价（只有 Victor 给的集/本汇总费用，换算不出准确的 token 单价，没有编造）。
+- qwen 配音、可灵视频、Grok(xai) 文本都是接口占位，没有对应密钥，真实调用全部 NOT_TESTED/BLOCKED。
+- `seed-audio-1.0`（配乐音效）和可灵的打戏视频还没有 model_catalog/stage 挂点。
+- 质量档位（草稿/标准/高质量可选模型）、后台管理页（供应商/模型/价格/用量，带鉴权）是 Victor 这轮追加的两个更大的需求，按约定顺序排在下一步，还没开始。
+- 提示词盘点：剧本理解/规划/分集/分镜/导入整理/二创改写/二创关键帧识别/定妆出图 都已固定成模板，但没有版本号，
+  且分散在 `script/series.py`、`script/api.py`、`remix/modes.py` 三个文件（`DIRECTOR_RULES` 单独在 api.py）。
+  统一目录+版本号计划并入后台管理页一起做。

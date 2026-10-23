@@ -56,7 +56,7 @@ async def test_generate_review_and_cache(engine, sessionmaker, user_and_project,
         assert (await c.post(f"/api/v1/shots/{shot.id}/keyframe/approve")).status_code == 409
         r = await c.post(f"/api/v1/shots/{shot.id}/keyframe")
         assert r.status_code == 201, r.text
-        assert r.json()["stage"] == "keyframe_image" and r.json()["usd"] == "0.0300"
+        assert r.json()["stage"] == "keyframe_image" and r.json()["usd"] == "0.0417"
         body = fake.bodies("/images/generations")[0]
         assert body["image"] == [*L[:3], "https://cdn.test/roof1.png"] and "林晚" in body["prompt"]
         grid = (await c.get(f"/api/v1/projects/{pid}/episodes/1/keyframes")).json()
