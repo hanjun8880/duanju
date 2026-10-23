@@ -171,8 +171,13 @@ async def test_lookdev_generate_saves_image_into_refs(engine, sessionmaker, user
         assets = (await c.get(f"/api/v1/projects/{pid}/lookdev")).json()
     body = fake.bodies("/images/generations")[0]
     assert body["model"] == "doubao-seedream-5-0-pro-260628" and "林晚" in body["prompt"] and "image" not in body
-    refs = next(x for x in assets if x["name"] == "林晚")["ref_urls"]
+    # Changed in team/lookdev (review P0): a render is only a *candidate* in ref_urls; it must not become the
+    # reference shots bind (that was ref_urls[0] before). Shots now bind locked_ref_urls, which only an explicit
+    # POST /lookdev/{id}/lock sets, so after a generate it stays empty.
+    card = next(x for x in assets if x["name"] == "林晚")
+    refs = card["ref_urls"]
     assert len(refs) == 1 and refs[0].startswith("/media/renders/") and Path(str(media.local_path(refs[0]))).read_bytes() == PNG
+    assert card["locked_ref_urls"] == []
 
 
 async def test_resume_polls_finishes_processing_jobs(engine, sessionmaker, user_and_project, ark):
