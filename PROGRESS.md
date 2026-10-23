@@ -117,3 +117,29 @@
 - 网页正文抓取是启发式（按块级标签长度过滤导航/按钮文案），非完整 readability 算法；复杂排版页面可能需要手动贴正文兜底。
 - 「按原文整理成剧本」需要 ANTHROPIC_API_KEY；未配置时明确报错，不是静默失败。
 - 原片拆解用的 faster-whisper 模型较大时，在资源受限环境可能被系统杀进程；生产环境需要给 worker 预留足够内存。
+
+## 专家团 · render 组（分支 team/render，2026-10-23）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| P0 首帧只来自 keyframe_status='approved' 的 keyframe_url，或 continuous_from_prev 时上一镜尾帧；其余镜头无首帧走参考图模式 | PASS | `test_orchestrator.py::test_master_chains_previous_last_frame`（改写）、`test_first_frame_only_from_approved_keyframe` |
+| on_shot_rendered 只给 continuous_from_prev 的下一镜写首帧 | PASS | `test_last_frame_only_written_to_continuous_next` |
+| 迟绑定参考：出片时按资产现值取参考（locked_ref_urls[:3]，空则 ref_urls[:1]），顺序 人物→场景→道具→模板；导入时另存 refs.asset_names | PASS | `test_refs_bound_late_from_locked_assets`、`test_tier_requests`（改写） |
+| 路由：shot_request 用 video_stage_for + model_for 取模型/分辨率；L2 默认 720p 按镜头类型（对白→seedance，动作/空镜/插入→wan3），1080p 仅 `final=true` | PASS | `test_master_model_routed_by_shot_kind`（含 MODEL_VIDEO_ACTION 环境覆盖） |
+| _failover 保留 batch/final；镜头彻底失败标 failed，其后连续镜头一并 failed，整集批次从下一个非连续镜头继续（内容拦截同样跳段，余额不足仍停） | PASS | `test_failed_chain_skips_to_next_cut`、`test_batch_failover_keeps_batch_and_dead_vendors_resume_at_cut` |
+| POST /api/v1/shots/{id}/select {job_id|null}；best_clips 优先 selected_job_id；镜头列表返回 shot_kind、continuous_from_prev、keyframe_url/status、selected_job_id、takes；PATCH 可改 shot_kind/continuous_from_prev | PASS | `test_select_take_overrides_best_clip` |
+| 前端 storyboard-canvas：每镜类型/「接上一镜」开关、关键帧状态、版本列表与选用 | PASS（tsc + vitest），浏览器 NOT_TESTED | 未跑 pnpm build/截图 |
+| 真实供应商出片 | BLOCKED | 无密钥 |
+
+后端 119 passed（基线 112，+7）；ruff、mypy 通过；pnpm tsc、pnpm test:run（6）通过。
+
+### 改动的旧测试（审查意见要求的行为变更）
+- `test_master_chains_previous_last_frame`：旧断言要求任何下一镜都接上一镜尾帧并丢掉参考图；改为硬切保留参考图、仅 continuous 镜头接尾帧。
+- `test_render_and_callback_propagates_last_frame`：显式把第 2 镜标为连续；请求加 `final: true` 以保留原 1080p 计费断言。
+- `test_tier_requests`：参考图改为迟绑定（每资产 1 张未锁定图，顺序 人物→场景→道具）；母带 1080p 断言改为 `final=True`，并新增默认 720p 断言。
+
+### 合并注意
+- `shot_orchestrator.refs_for_episode` 是临时实现，合并时换成 lookdev 组的 `lookdev/refs.py`（签名一致）。
+- 共享文件改动：`gateway/router.py`（新增 `_shot_failed` 钩子、_failover 复制 batch/final、render_next 透传 final）。
+- 前端 `lib/estimate.ts` 的 tierPlan 仍按 L2=1080p 估价，未改（共享文件）；合并后应按 routing 表更新，否则母带预估偏高。
+- `ShotX` 本地类型补了新字段，contracts.ts 重生成后可删。
