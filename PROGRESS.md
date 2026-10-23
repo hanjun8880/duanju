@@ -230,3 +230,33 @@
 - 渲染请求仍按 Seedance 默认 generate_audio=True（shot_orchestrator 属 render 组）；需要 render 组改为 `generate_audio=settings.video_native_audio`。
 - TTS 不走积分账本（无 job）；靠缓存控制消耗。需要计费时由 ledger 组接。
 - 每镜仅一个说话人（沿用 shots.speaker_asset_id）；镜内多人对白需要拆镜。
+
+## Team remix — AI 连续剧二创（分支 team/remix）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| dHash 感知哈希去重相邻相似关键帧（+均色守卫，纯色帧不误合并；非相邻回切保留） | PASS | `test_remix_dedupe.py`（FFmpeg 真实出图） |
+| 视觉识别预估：送图数 / 批数 / token / USD；未知模型 usd=None 不瞎估；价格未核实 | PASS | 同上 |
+| 按视频 sha256 缓存拆解结果（改名重传零重算）；关键帧描述按 (sha256, 模型) 缓存 | PASS | 同上 + `test_remix_api.py`（第 2 集同文件：拆解命中缓存、视觉只调 1 次） |
+| 关键帧长边限制 768px（≈440 token/张，原 1080x1920 ≈1500） | PASS | `test_remix_rhythm.py::test_keyframes_are_shrunk_before_any_vision_call` |
+| 每集节奏表（镜头数、平均镜长、每分钟切数、开场 3 秒钩子、快切高潮、结尾悬念）→ `series_bible_json.rhythm` | PASS | `test_remix_rhythm.py` |
+| 二创模式：换人物/换风格/改剧情/续写/番外/精简剪辑，可组合，结构化输出 SeriesPlan；模型走 `model_for("remix_rewrite")`，视觉走 `model_for("remix_vision")` | PASS（SSE 桩） | `test_remix_modes.py` |
+| 一键 fork 自家项目：继承圣经、分集（含剧本）、定妆（ref/locked/voice）、空镜（establishing 镜头+关键帧），不重新生成；`meta.inherited_from` / `series_bible_json.inherited_from` | PASS | `test_remix_fork.py` |
+| fork + 二创：未被模式改动的锁定定妆保留（模型重述不覆盖），被换人物/换风格的清空参考并标 `needs_lookdev` | PASS | 同上 |
+| 合规：外部原片人物 `meta.redesign_required=true`、清空参考/人脸嵌入；新参考就绪后才能解除；改写指令和模型产出的人物/剧情都过 `safety.check_prompt` | PASS | `test_remix_fork.py`、`test_remix_modes.py` |
+| API `/api/v1/remix/*`：多集登记、拆解进度、预估、识别、生成新项目、fork、解除重设计标记 | PASS | `test_remix_api.py`（真实 FFmpeg/PySceneDetect/whisper tiny + Postgres） |
+| 前端「二创工作室」抽屉（页头入口） | PASS（tsc + vitest 6 项）/ NOT_TESTED（未截图） | `features/remix-studio/remix.test.ts` |
+| 真实 Claude 视觉/改写调用 | BLOCKED | 无 ANTHROPIC_API_KEY |
+
+后端 137 passed（新增 25 项）；`ruff`、`mypy` 通过；`pnpm tsc`、`pnpm test:run`（12）通过。
+
+### 接口与约定
+- 拆解状态不建新表：`<STORAGE_DIR>/remix/<project_id>/manifest.json`（flock 加锁）；缓存 `<STORAGE_DIR>/remix_cache/<sha256>/`。
+- Celery：任务 `remix.episode` 注册在共享 `celery_app` 上，但定义在 `src/domains/remix/tasks.py`；worker 需 `celery -A src.queue worker -Q local_post -I src.domains.remix.tasks`。inline 模式用 FastAPI BackgroundTasks。
+- 给 lookdev 组：`compliance.bindable_refs(asset)` 在 `redesign_required` 时返回空——绑定镜头参考时请调用或遵守该字段；`POST /remix/projects/{pid}/assets/{aid}/redesigned` 解除。
+- 给 render 组：fork 出的空镜 `shots.source_remix_meta.clip_path` 是继承来的成片路径（原 job 属于父项目，`best_clips` 查不到），合成时可直接用。
+- 旧 `/projects/{id}/remix` 单视频路径与 `queue.remix` 未改动（`LIGHT_MODEL` 写死仍在 queue.py，不在本组所有权内）。
+
+### 已知限制
+- 节奏表钩子是规则判断（开场 3 秒内有台词或切镜、连续 ≥2 个短于平均一半的镜头、末镜），非语义识别。
+- fork 只复制 establishing 镜头，剧情镜头需重新分镜；fork+二创只传父项目大纲与圣经，不传全文。
