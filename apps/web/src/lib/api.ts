@@ -62,3 +62,37 @@ export function useBusySet<K>() {
   }, []);
   return { busy, run };
 }
+
+// --- remix studio (team/remix): types live here because contracts.ts is regenerated after merge ---
+export type RemixMode = "recast" | "restyle" | "replot" | "sequel" | "spinoff" | "condense";
+export interface RemixSpec {
+  modes: RemixMode[]; recast?: Record<string, string>; style?: string; plot_direction?: string;
+  spinoff_focus?: string; condense_ratio?: number; episode_count?: number;
+}
+export interface RemixSource {
+  episode_number: number; status: string; progress: number; sha256: string | null; cache_hit: boolean;
+  shots: number | null; kept: number | null; error: string | null; video_path: string;
+}
+export interface RemixEstimate {
+  model: string; price_verified: boolean;
+  episodes: { episode_number: number; status: string; shots?: number; images: number | null; images_without_dedupe?: number; usd: number | null }[];
+  total: { images: number; batches: number; usd: number | null };
+}
+export interface RemixProject { id: string; title: string; category: string; status: string; episodes?: number }
+
+const rx = (pid: string) => `/remix/projects/${pid}`;
+export const remixApi = {
+  sources: (pid: string) => api<RemixSource[]>(`${rx(pid)}/sources`),
+  register: (pid: string, episode_number: number, video_path: string) =>
+    api<RemixSource>(`${rx(pid)}/sources`, { method: "POST", json: { episode_number, video_path } }),
+  remove: (pid: string, ep: number) => fetch(`/api/v1${rx(pid)}/sources/${ep}`, { method: "DELETE" }),
+  deconstruct: (pid: string, describe: boolean, episodes?: number[]) =>
+    api<{ queued: number[] }>(`${rx(pid)}/deconstruct`, { method: "POST", json: { describe, episodes } }),
+  estimate: (pid: string) => api<RemixEstimate>(`${rx(pid)}/estimate`),
+  generate: (pid: string, spec: RemixSpec, title?: string) =>
+    api<RemixProject>(`${rx(pid)}/generate`, { method: "POST", json: { spec, title: title || undefined } }),
+  fork: (source_project_id: string, title?: string, spec?: RemixSpec) =>
+    api<RemixProject>("/remix/fork", { method: "POST", json: { source_project_id, title: title || undefined, spec } }),
+  markRedesigned: (pid: string, assetId: string) =>
+    api<{ redesign_required: boolean }>(`${rx(pid)}/assets/${assetId}/redesigned`, { method: "POST" }),
+};

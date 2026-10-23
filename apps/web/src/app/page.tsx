@@ -1,5 +1,5 @@
 "use client";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import type { Me, Project } from "@/lib/contracts";
 import { useApi } from "@/lib/api";
 import { useWorkbench, type Tab } from "@/lib/store";
@@ -9,6 +9,7 @@ import { StoryboardCanvas } from "@/features/storyboard-canvas/StoryboardCanvas"
 import { AdminLedger } from "@/features/admin-ledger/AdminLedger";
 import { ScriptRoom } from "@/features/script-room/ScriptRoom";
 import { FinalCut } from "@/features/final-cut/FinalCut";
+import { RemixStudio } from "@/features/remix-studio/RemixStudio";
 
 // The five steps of making a series, in order.
 const TABS: { id: Tab; label: string }[] = [
@@ -24,6 +25,7 @@ export default function Workbench() {
   const { projectId, setProject, tab, setTab, ledgerOpen, setLedgerOpen } = useWorkbench();
   const projects = useApi<Project[]>("/projects");
   const me = useApi<Me>("/me");
+  const [remixOpen, setRemixOpen] = useState(false);
   const current = projects.data?.find((p) => p.id === projectId) ?? null;
 
   useEffect(() => {
@@ -47,6 +49,7 @@ export default function Workbench() {
           </div>
           <div className="flex items-center gap-4 text-sm text-ink-soft">
             {me.data && <span>余额 <b className="text-lg text-ink">{Number(me.data.credits).toFixed(1)}</b> 积分，日限 {Number(me.data.daily_limit_credits).toFixed(0)}</span>}
+            <button className="btn btn-quiet" onClick={() => setRemixOpen(true)}>二创工作室</button>
             <button className="btn btn-quiet" onClick={() => setLedgerOpen(true)}>账本与模型</button>
           </div>
         </div>
@@ -69,6 +72,8 @@ export default function Workbench() {
         {tab === "final" && (current ? <FinalCut project={current} /> : <NeedProject />)}
       </main>
 
+      {remixOpen && <RemixStudio projects={projects.data ?? []} currentId={projectId} onClose={() => setRemixOpen(false)}
+        onCreated={(id) => { projects.reload(); setProject(id); }} />}
       {ledgerOpen && <AdminLedger onClose={() => { setLedgerOpen(false); me.reload(); }} />}
     </div>
   );
