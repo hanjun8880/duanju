@@ -268,16 +268,37 @@ def clip_file(s3_key: str) -> Path | None:
 
 
 async def best_clips(session: AsyncSession, project_id: uuid.UUID, episode: int) -> dict[uuid.UUID, Path]:
-    """Per shot: the highest-tier, newest finished video we hold locally."""
+    """Per shot: the take the director selected, else the highest-tier, newest finished video we hold locally."""
     rows = (await session.execute(
-        select(Job.shot_id, Job.request_payload, Asset.s3_key).join(Asset, Asset.job_id == Job.id)
-        .join(Shot, Shot.id == Job.shot_id)
+        select(Job.shot_id, Job.request_payload, Asset.s3_key, Job.id, Shot.selected_job_id)
+        .join(Asset, Asset.job_id == Job.id).join(Shot, Shot.id == Job.shot_id)
         .where(Shot.project_id == project_id, Shot.episode_number == episode, Job.status == "success",
                Asset.kind == "video").order_by(Asset.created_at))).all()
     best: dict[uuid.UUID, tuple[int, Path]] = {}
-    for shot_id, payload, key in rows:
+    for shot_id, payload, key, job_id, selected in rows:
         f = clip_file(key)
-        rank = TIER_RANK.get(payload.get("render_tier", ""), 0)
+        rank = 99 if job_id == selected else TIER_RANK.get(payload.get("render_tier", ""), 0)
         if f is not None and shot_id is not None and rank >= best.get(shot_id, (0, f))[0]:
             best[shot_id] = (rank, f)
     return {k: v[1] for k, v in best.items()}
+
+
+async def shot_takes(session: AsyncSession, shot_ids: list[uuid.UUID]) -> dict[uuid.UUID, list[dict[str, Any]]]:
+    """Every finished video take per shot (newest first), for the director to compare and select."""
+    if not shot_ids:
+        return {}
+    rows = (await session.execute(
+        select(Job.shot_id, Job.id, Job.model_key, Job.request_payload, Asset.s3_key, Asset.created_at)
+        .join(Asset, Asset.job_id == Job.id)
+        .where(Job.shot_id.in_(shot_ids), Job.status == "success", Asset.kind == "video")
+        .order_by(Asset.created_at.desc()))).all()
+    out: dict[uuid.UUID, list[dict[str, Any]]] = {}
+    for shot_id, job_id, model_key, payload, key, created_at in rows:
+        f = clip_file(key)
+        url = media.url_for(f) if f is not None and media.root() in f.parents else None
+        if shot_id is None or url is None:
+            continue
+        out.setdefault(shot_id, []).append({
+            "job_id": str(job_id), "render_tier": payload.get("render_tier"), "model_key": model_key,
+            "final": bool(payload.get("final")), "url": url, "created_at": created_at.isoformat()})
+    return out

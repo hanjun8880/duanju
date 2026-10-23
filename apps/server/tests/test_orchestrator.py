@@ -132,6 +132,46 @@ async def test_batch_failover_keeps_batch_and_dead_vendors_resume_at_cut(
     assert queued == [shots[2].id]
 
 
+async def add_take(sessionmaker, pid, shot_id, tier):
+    from src.models import Asset, Job
+    f = media.root() / "renders" / f"take-{shot_id}-{tier}.mp4"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_bytes(b"mp4")
+    async with sessionmaker() as s, s.begin():
+        job = Job(shot_id=shot_id, project_id=pid, task_type="video.i2v", model_key="seedance_2_5_spicy",
+                  request_payload={"render_tier": tier}, status="success")
+        s.add(job)
+        await s.flush()
+        s.add(Asset(job_id=job.id, project_id=pid, kind="video", s3_key=media.url_for(f)))
+        return job.id, f
+
+
+async def test_select_take_overrides_best_clip(sessionmaker, user_and_project):
+    _, pid = user_and_project
+    async with sessionmaker() as s:
+        shots = await orch.import_storyboard(s, pid, 1, BOARD)
+    draft_id, draft_file = await add_take(sessionmaker, pid, shots[0].id, "L1_draft")
+    master_id, master_file = await add_take(sessionmaker, pid, shots[0].id, "L2_master")
+    other_id, _ = await add_take(sessionmaker, pid, shots[1].id, "L1_draft")
+    async with sessionmaker() as s:
+        assert (await orch.best_clips(s, pid, 1))[shots[0].id] == master_file.resolve()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        bad = await c.post(f"/api/v1/shots/{shots[0].id}/select", json={"job_id": str(other_id)})
+        assert bad.status_code == 422
+        r = await c.post(f"/api/v1/shots/{shots[0].id}/select", json={"job_id": str(draft_id)})
+        assert r.status_code == 200 and r.json()["selected_job_id"] == str(draft_id)
+        listed = (await c.get(f"/api/v1/projects/{pid}/shots", params={"episode": 1})).json()
+    async with sessionmaker() as s:
+        assert (await orch.best_clips(s, pid, 1))[shots[0].id] == draft_file.resolve()
+    first = listed[0]
+    assert first["selected_job_id"] == str(draft_id) and first["shot_kind"] == "dialogue"
+    assert first["continuous_from_prev"] is False and first["keyframe_status"] == "none"
+    assert "keyframe_url" in first
+    assert {t["job_id"] for t in first["takes"]} == {str(draft_id), str(master_id)}
+    assert {t["render_tier"] for t in first["takes"]} == {"L1_draft", "L2_master"}
+    assert all(t["url"].startswith("/media/") for t in first["takes"])
+
+
 async def test_master_model_routed_by_shot_kind(sessionmaker, user_and_project, monkeypatch):
     _, pid = user_and_project
     async with sessionmaker() as s:
