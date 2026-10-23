@@ -3,6 +3,7 @@ import { useState } from "react";
 import { api, useApi } from "@/lib/api";
 import type { Episode, Project } from "@/lib/contracts";
 import { useWorkbench } from "@/lib/store";
+import { type LlmUsage, type PlanProgress, progressText, usageText } from "./progress";
 
 const STATUS: Record<string, string> = { outlined: "大纲", scripted: "已成剧本", storyboarded: "已拆分镜" };
 const EPISODE_SECONDS = 90;
@@ -16,6 +17,9 @@ export function ScriptRoom({ project, onChanged }: { project: Project; onChanged
   const [mode, setMode] = useState<"generate" | "import">("generate");
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [planning, setPlanning] = useState(false);
+  const progress = useApi<PlanProgress>(planning ? `/projects/${project.id}/plan/progress` : null, 2000);
+  const spend = useApi<LlmUsage>(`/projects/${project.id}/llm-usage`);
   const bible = project.series_bible_json ?? {};
   const list = episodes.data ?? [];
   const current = list.find((e) => e.episode_number === episode) ?? list[0];
@@ -23,12 +27,14 @@ export function ScriptRoom({ project, onChanged }: { project: Project; onChanged
   const run = async (label: string, fn: () => Promise<string>) => {
     setBusy(label); setMsg(null);
     try { setMsg({ ok: true, text: await fn() }); } catch (e) { setMsg({ ok: false, text: (e as Error).message }); }
-    setBusy(null); episodes.reload(); onChanged();
+    setBusy(null); episodes.reload(); spend.reload(); onChanged();
   };
   const plan = () => run("正在通读素材、锁定人物与分集…", async () => {
     if (list.length && !confirm("重新规划会替换现有的分集大纲和剧本（已有分镜不受影响）。继续吗？")) return "已取消";
+    setPlanning(true);
     const r = await api<{ title: string; episodes: number; characters: number; props: number; scenes: number }>(
-      `/projects/${project.id}/plan`, { method: "POST", json: { episode_count: count, direction: direction.trim() || null, replace: list.length > 0 } });
+      `/projects/${project.id}/plan`, { method: "POST", json: { episode_count: count, direction: direction.trim() || null, replace: list.length > 0 } })
+      .finally(() => setPlanning(false));
     setEpisode(1);
     return `《${r.title}》共 ${r.episodes} 集；已建立 ${r.characters} 个人物、${r.props} 件道具、${r.scenes} 处场景的定妆卡`;
   });
@@ -94,6 +100,8 @@ export function ScriptRoom({ project, onChanged }: { project: Project; onChanged
       </section>
 
       {busy && <p className="text-dawn" role="status">{busy} 长篇需要几分钟，请不要关闭页面。</p>}
+      {planning && progressText(progress.data) && <p className="text-sm text-ink-soft" role="status">{progressText(progress.data)}</p>}
+      {usageText(spend.data) && <p className="text-xs text-ink-soft">{usageText(spend.data)}</p>}
       {msg && <p className={msg.ok ? "text-ink" : "text-seal"} role="status">{msg.text}</p>}
 
       {list.length > 0 && current && (

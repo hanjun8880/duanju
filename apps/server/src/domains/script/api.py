@@ -1,8 +1,9 @@
 import asyncio
+import contextlib
 import os
 import shutil
 import uuid
-from collections.abc import Awaitable
+from collections.abc import AsyncIterator, Awaitable
 from pathlib import Path
 from typing import Any, Literal
 
@@ -13,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
 from src.deps import Http, Session, director
-from src.domains.script import series, source_import
+from src.domains.script import series, source_import, usage
 from src.domains.script.script_engine import (
     CachedDirectorLLM,
     EpisodeScript,
@@ -28,7 +29,9 @@ api = APIRouter(prefix="/api/v1")
 
 DIRECTOR_RULES = (
     "你是连续剧分镜导演。按短剧节奏拆镜：前3秒强冲突钩子、中段情绪递进、结尾悬念卡点。"
-    "同场次连续动作优先合并为15-30秒单镜到底。five_part_visual_prompt 必须依次写：1起始构图 2摄影机运动 "
+    "每镜 4-8 秒为主，最长 10 秒；一段连续动作拆成几镜时，后续镜头标 continuous_from_prev=true（接上一镜尾帧）。"
+    "shot_kind 标 dialogue/action/establishing/insert；有台词时 speaker 填说话角色名。"
+    "five_part_visual_prompt 必须依次写：1起始构图 2摄影机运动 "
     "3主体连续动作与交互 4环境光影变化 5结束定格。角色、道具、场景名必须与 SERIES_BIBLE 中的名称完全一致。"
     "所有角色均为虚构成年人。"
 )
@@ -44,8 +47,9 @@ class ProjectCreate(BaseModel):
 
 
 def project_view(p: Project) -> dict[str, Any]:
+    bible = {k: v for k, v in (p.series_bible_json or {}).items() if not k.startswith("_")}  # no digest cache
     return {"id": str(p.id), "title": p.title, "category": p.category, "content_mode": p.content_mode,
-            "aspect_ratio": p.aspect_ratio, "status": p.status, "series_bible_json": p.series_bible_json,
+            "aspect_ratio": p.aspect_ratio, "status": p.status, "series_bible_json": bible,
             "has_source_text": bool(p.source_novel_text), "created_at": p.created_at.isoformat()}
 
 
@@ -106,10 +110,26 @@ async def compile_storyboard(project_id: uuid.UUID, body: CompileRequest, sessio
     mode, bible = p.content_mode, p.series_bible_json
     await _replaceable_shots(session, project_id, body.episode_number)
     await session.close()
-    board = await _llm(CachedDirectorLLM().compile_episode_storyboard(DIRECTOR_RULES, bible, body.text,
-                                                                      content_mode=mode))
+    async with _ledgered(project_id) as llm:
+        board = await _llm(llm.compile_episode_storyboard(DIRECTOR_RULES, bible, body.text, content_mode=mode))
     shots = await orch.import_storyboard(session, project_id, body.episode_number, board)
     return {"created": len(shots), "episode_title": board.episode_title, "hook_summary": board.hook_summary}
+
+
+@contextlib.asynccontextmanager
+async def _ledgered(project_id: uuid.UUID) -> AsyncIterator[CachedDirectorLLM]:
+    """One LLM client per request; every call it made (even refused/truncated ones) becomes a jobs row."""
+    llm = CachedDirectorLLM()
+    try:
+        yield llm
+    finally:
+        await usage.record_llm_calls(project_id, llm.calls)
+
+
+@api.get("/projects/{project_id}/llm-usage")
+async def llm_usage(project_id: uuid.UUID, session: Session) -> dict[str, Any]:
+    """LLM spend for this project, from the llm.* job rows (USD is an estimate from settings.llm_prices)."""
+    return await usage.project_spend(session, project_id)
 
 
 def _need_llm(p: Project) -> None:
@@ -237,7 +257,10 @@ class PlanRequest(BaseModel):
 
 @api.post("/projects/{project_id}/plan", status_code=201)
 async def plan_series(project_id: uuid.UUID, body: PlanRequest, session: Session) -> dict[str, Any]:
-    """Source text -> locked series bible + look-dev cards + episode outlines (one LLM call)."""
+    """Source text -> locked series bible + look-dev cards + episode outlines.
+    Short sources: one plan call. Long novels (up to 2M chars): per-segment digests (cheap summarize model,
+    cached by segment sha256 in series_bible_json._cache) -> plan the bible -> outlines <=20 episodes a call.
+    Progress is written to series_bible_json._progress; poll GET /projects/{id}/plan/progress."""
     p = await session.get(Project, project_id)
     if p is None:
         raise HTTPException(404, "project not found")
@@ -252,14 +275,36 @@ async def plan_series(project_id: uuid.UUID, body: PlanRequest, session: Session
         raise HTTPException(409, "episodes already planned; pass replace=true to re-plan")
     _need_llm(p)
     mode = p.content_mode
+    cache: dict[str, Any] = dict((p.series_bible_json or {}).get("_cache") or {})
     await session.close()
-    plan: SeriesPlan = await _llm(CachedDirectorLLM().structured(
-        SeriesPlan, series.PLAN_RULES, {}, series.plan_prompt(segments, body.episode_count, body.direction),
-        mode, effort="high"))
+
+    async def progress(state: dict[str, Any]) -> None:
+        await _save_bookkeeping(project_id, {"_progress": state, "_cache": cache})
+
+    async with _ledgered(project_id) as llm:
+        try:
+            if series.needs_two_stage(segments):
+                plan = await _llm(series.two_stage_plan(llm, segments, body.episode_count, body.direction, mode,
+                                                        cache, progress))
+            else:
+                await progress({"stage": "plan", "done": 0, "total": 1})
+                plan = await _llm(llm.structured(
+                    SeriesPlan, series.PLAN_RULES, {},
+                    series.plan_prompt(segments, body.episode_count, body.direction), mode, effort="high",
+                    stage="plan"))
+        except HTTPException as e:
+            await progress({"stage": "error", "error": str(e.detail)[:500]})
+            raise
+        except Exception as e:
+            await progress({"stage": "error", "error": str(e)[:500]})
+            raise
+    done = {"stage": "done", "done": len(plan.episodes), "total": len(plan.episodes),
+            "episodes": len(plan.episodes)}
     async with session.begin():
         p = await session.get(Project, project_id, with_for_update=True)
         assert p is not None
-        p.series_bible_json, p.status = series.bible_from_plan(plan), "planned"
+        p.series_bible_json = series.bible_from_plan(plan, {"_cache": cache, "_progress": done})
+        p.status = "planned"
         await session.execute(delete(Episode).where(Episode.project_id == project_id))
         session.add_all([Episode(project_id=project_id, episode_number=o.episode_number, title=o.title,
                                  synopsis=o.synopsis, source_segments=[i for i in o.source_segments
@@ -275,6 +320,25 @@ async def plan_series(project_id: uuid.UUID, body: PlanRequest, session: Session
                          for t, n, r, v in cards if n not in have])
     return {"title": plan.title, "logline": plan.logline, "episodes": len(plan.episodes),
             "characters": len(plan.characters), "props": len(plan.props), "scenes": len(plan.scenes)}
+
+
+async def _save_bookkeeping(project_id: uuid.UUID, keys: dict[str, Any]) -> None:
+    """Merge "_" keys into series_bible_json in its own short transaction (the request session is closed
+    during LLM calls). A new dict is assigned so the JSONB change is always flushed."""
+    from src.db import SessionLocal
+    async with SessionLocal() as s, s.begin():
+        p = await s.get(Project, project_id, with_for_update=True)
+        if p is not None:
+            p.series_bible_json = {**(p.series_bible_json or {}), **keys}
+
+
+@api.get("/projects/{project_id}/plan/progress")
+async def plan_progress(project_id: uuid.UUID, session: Session) -> dict[str, Any]:
+    p = await session.get(Project, project_id)
+    if p is None:
+        raise HTTPException(404, "project not found")
+    bible = p.series_bible_json or {}
+    return {"stage": "idle", **(bible.get("_progress") or {}), "cached_segments": len(bible.get("_cache") or {})}
 
 
 @api.get("/projects/{project_id}/episodes")
@@ -309,10 +373,11 @@ async def import_script(project_id: uuid.UUID, body: ImportScriptRequest, sessio
         mode = p.content_mode
         await session.close()
         reformatted: list[str] = []
-        for seg in segments:
-            out: EpisodeScript = await _llm(CachedDirectorLLM().structured(
-                EpisodeScript, series.REFORMAT_RULES, {}, seg, mode))
-            reformatted.append(out.script_text)
+        async with _ledgered(project_id) as llm:
+            for seg in segments:
+                out: EpisodeScript = await _llm(llm.structured(
+                    EpisodeScript, series.REFORMAT_RULES, {}, seg, mode, stage="reformat"))
+                reformatted.append(out.script_text)
         segments = reformatted
     else:
         await session.close()
@@ -364,8 +429,9 @@ async def write_script(project_id: uuid.UUID, n: int, session: Session) -> dict[
     prompt = series.script_prompt(episode_view(e), segments, prev)
     mode, bible = p.content_mode, p.series_bible_json
     await session.close()
-    out: EpisodeScript = await _llm(CachedDirectorLLM().structured(EpisodeScript, series.SCRIPT_RULES, bible,
-                                                                    prompt, mode))
+    async with _ledgered(project_id) as llm:
+        out: EpisodeScript = await _llm(llm.structured(EpisodeScript, series.SCRIPT_RULES, bible, prompt, mode,
+                                                       stage="script"))
     async with session.begin():
         e = await _episode(session, project_id, n)
         e.script_text, e.status = out.script_text, "scripted"
@@ -385,7 +451,8 @@ async def storyboard_episode(project_id: uuid.UUID, n: int, session: Session) ->
     mode, bible = p.content_mode, p.series_bible_json
     await _replaceable_shots(session, project_id, n)
     await session.close()
-    board = await _llm(CachedDirectorLLM().compile_episode_storyboard(DIRECTOR_RULES, bible, text, content_mode=mode))
+    async with _ledgered(project_id) as llm:
+        board = await _llm(llm.compile_episode_storyboard(DIRECTOR_RULES, bible, text, content_mode=mode))
     shots = await orch.import_storyboard(session, project_id, n, board)
     async with session.begin():
         (await _episode(session, project_id, n)).status = "storyboarded"
