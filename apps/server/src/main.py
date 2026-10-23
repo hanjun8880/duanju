@@ -16,6 +16,7 @@ from src.domains.gateway.router import resume_polls
 from src.domains.lookdev.api import api as lookdev_api
 from src.domains.script.api import api as script_api
 from src.domains.storyboard.api import api as storyboard_api
+from src.domains.voice.api import api as voice_api
 
 __all__ = ["app", "get_http_client"]
 
@@ -34,7 +35,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="Director Workbench API", lifespan=lifespan)
 app.middleware("http")(auth.middleware)
-for r in (auth.api, gateway_api, script_api, lookdev_api, storyboard_api):
+for r in (auth.api, gateway_api, script_api, lookdev_api, storyboard_api, voice_api):
     app.include_router(r)
 Path(settings.storage_dir).mkdir(parents=True, exist_ok=True)
 app.mount("/media", StaticFiles(directory=settings.storage_dir), name="media")
