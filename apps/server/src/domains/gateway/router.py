@@ -1,5 +1,6 @@
 """Job creation, vendor dispatch with one-hop failover, and webhook settlement."""
 import asyncio
+import hashlib
 import json
 import logging
 import mimetypes
@@ -26,7 +27,7 @@ from src.domains.gateway.adapters.base import (
     ProviderRetryable,
 )
 from src.domains.gateway.schemas import JobCreateRequest, preflight
-from src.models import Asset, Job, ModelCatalog, Project
+from src.models import Asset, Job, ModelCatalog, Project, Shot
 
 log = logging.getLogger(__name__)
 __all__ = ["ProviderNotConfigured", "ProviderRejected", "ProviderUnavailable", "WebhookAuthError"]
@@ -44,18 +45,59 @@ def webhook_url(provider: str) -> str:
     return f"{os.environ.get('PUBLIC_BASE_URL', 'http://localhost:8000').rstrip('/')}/api/v1/webhooks/{provider}"
 
 
+def content_hash(model_key: str, task: str, canonical: dict[str, Any]) -> str:
+    """Same model + same cleaned request => same output: sha256(model_key + sorted JSON)."""
+    return hashlib.sha256((model_key + json.dumps({"task_type": task, **canonical}, sort_keys=True,
+                                                  ensure_ascii=False)).encode()).hexdigest()
+
+
+async def _stage_of(session: AsyncSession, req: JobCreateRequest, task: str, meta: dict[str, Any]) -> str:
+    if meta.get("stage"):
+        return str(meta["stage"])
+    if meta.get("lookdev_id"):
+        return "lookdev_image"
+    if meta.get("keyframe_shot_id"):
+        return "keyframe_image"
+    if not task.startswith("video."):
+        return task.split(".")[0]
+    if req.resolution == "480p" or meta.get("render_tier") == "L1_draft":
+        return "video_draft"
+    if req.resolution == "1080p":
+        return "video_final"
+    kind = (await session.execute(select(Shot.shot_kind).where(Shot.id == req.shot_id))).scalar_one_or_none() \
+        if req.shot_id else None
+    return f"video_{kind}" if kind in ("dialogue", "action", "establishing", "insert") else "video_dialogue"
+
+
 async def create_job(session: AsyncSession, *, user_id: uuid.UUID, req: JobCreateRequest,
                      model_key: str | None = None, failover_of: uuid.UUID | None = None,
-                     meta: dict[str, Any] | None = None) -> Job:
+                     meta: dict[str, Any] | None = None, force: bool = False) -> Job:
+    """Pre-deducted queued job, or (identical earlier render still on disk, not forced) a zero-cost success job
+    with request_payload.cached_from. Raises ledger.BudgetExceeded when a USD budget would be exceeded."""
+    meta = dict(meta or {})
+    force = bool(meta.pop("force", False)) or force
     task, canonical = preflight(req)
-    payload: dict[str, Any] = {**(meta or {}), "request": req.model_dump(mode="json"), "task_type": task,
+    key = model_key or req.model_key
+    stage = await _stage_of(session, req, task, meta)
+    meta.pop("stage", None)
+    payload: dict[str, Any] = {**meta, "request": req.model_dump(mode="json"), "task_type": task,
                                "canonical": canonical, "billable_units": req.billable_units(),
-                               "resolution": req.resolution}
+                               "resolution": req.resolution, "stage": stage}
+    h = content_hash(key, task, canonical)
     if failover_of:
         payload["failover_of"] = str(failover_of)
+    elif not force:
+        hit = await ledger.find_cached(session, req.project_id, h)
+        await session.close()
+        if hit is not None:
+            log.info("cache hit %s -> reuse job %s", h[:12], hit[0].id)
+            return await ledger.record_cached_job(session, source=hit[0], assets=hit[1], shot_id=req.shot_id,
+                                                  task_type=task, request_payload=payload)
+    await session.close()  # ledger owns its own transaction
     return await ledger.create_job_with_prededuct(
-        session, user_id=user_id, project_id=req.project_id, model_key=model_key or req.model_key, task_type=task,
-        request_payload=payload, billable_units=req.billable_units(), resolution=req.resolution, shot_id=req.shot_id)
+        session, user_id=user_id, project_id=req.project_id, model_key=key, task_type=task,
+        request_payload=payload, billable_units=req.billable_units(), resolution=req.resolution, shot_id=req.shot_id,
+        content_hash=h)
 
 
 async def _refund(sm: async_sessionmaker[AsyncSession], job_id: uuid.UUID, reason: str, error: str,
@@ -85,6 +127,8 @@ async def dispatch_job(sm: async_sessionmaker[AsyncSession], job_id: uuid.UUID, 
         assert job is not None
         model = await s.get(ModelCatalog, job.model_key)
         assert model is not None
+    if job.status != "queued":  # e.g. a cache hit (already success): never send it to a vendor
+        return job
     adapter = ADAPTERS.get(model.provider)
     canonical = dict(job.request_payload["canonical"])
     canonical["callback_url"] = job.request_payload["request"].get("callback_url") or webhook_url(model.provider)
@@ -211,6 +255,10 @@ async def _after_success(sm: async_sessionmaker[AsyncSession], client: httpx.Asy
         from src.domains.lookdev.api import on_lookdev_rendered
         async with sm() as s:
             await on_lookdev_rendered(s, uuid.UUID(p["lookdev_id"]), urls["image"])
+    if p.get("keyframe_shot_id") and urls.get("image"):
+        from src.domains.storyboard.keyframes import on_keyframe_rendered
+        async with sm() as s:
+            await on_keyframe_rendered(s, uuid.UUID(p["keyframe_shot_id"]), urls["image"])
     if job.shot_id and "render_tier" in p:
         from src.domains.storyboard import shot_orchestrator as orch
         async with sm() as s:
