@@ -138,6 +138,15 @@ def test_model_for_tier_precedence(monkeypatch):
         routing._runtime.pop("script", None)
 
 
+def test_overseas_tier_routes_script_to_grok():
+    from src.domains.gateway import routing
+    from src.domains.script.script_engine import VENDOR_API_KEY_ENV
+
+    overseas = routing.model_for("script", tier="overseas")
+    assert (overseas.model, overseas.provider) == ("grok-4", "xai")
+    assert VENDOR_API_KEY_ENV["xai"] == "XAI_API_KEY"
+
+
 def test_tiers_for_includes_standard_and_configured_tiers():
     from src.domains.gateway import routing
 

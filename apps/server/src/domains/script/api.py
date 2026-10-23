@@ -286,8 +286,8 @@ class PlanRequest(BaseModel):
     episode_count: int | None = Field(default=None, ge=1, le=200)
     direction: str | None = Field(default=None, max_length=500, description="创作方向：类型、剧情偏好等，可选")
     replace: bool = False
-    tier: Literal["draft", "standard", "high"] | None = Field(
-        default=None, description="本次规划用的质量档位；不填则用项目保存的默认档位")
+    tier: Literal["draft", "standard", "high", "overseas"] | None = Field(
+        default=None, description="本次规划用的质量档位；overseas=Grok，偏海外题材；不填则用项目保存的默认档位")
 
 
 @api.post("/projects/{project_id}/plan", status_code=201)
@@ -452,8 +452,8 @@ async def patch_episode(project_id: uuid.UUID, n: int, body: EpisodePatch, sessi
 
 
 class StageCallOptions(BaseModel):
-    tier: Literal["draft", "standard", "high"] | None = Field(
-        default=None, description="本次调用用的质量档位；不填则用项目保存的默认档位")
+    tier: Literal["draft", "standard", "high", "overseas"] | None = Field(
+        default=None, description="本次调用用的质量档位；overseas=Grok，偏海外题材；不填则用项目保存的默认档位")
 
 
 @api.post("/projects/{project_id}/episodes/{n}/script", status_code=201)

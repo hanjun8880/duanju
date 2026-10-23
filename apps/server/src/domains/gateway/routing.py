@@ -62,10 +62,12 @@ QUALITY_TIERS: dict[str, dict[str, dict[str, str]]] = {
     "plan": {
         "draft": {"model": "glm-5.3", "provider": "zhipu", "price_note": "~3.4 元/本"},
         "high": {"model": "kimi-k3", "provider": "moonshot", "price_note": "质量上限，比 GLM-5.3 贵"},
+        "overseas": {"model": "grok-4", "provider": "xai", "price_note": "偏海外题材；需 XAI_API_KEY，价格未核实"},
     },
     "script": {
         "draft": {"model": "doubao-seed-2-1-lite-260915", "provider": "doubao", "price_note": "~0.02 元/集"},
         "high": {"model": "kimi-k3", "provider": "moonshot", "price_note": "~0.3 元/集，盲测与 Claude 并列第一"},
+        "overseas": {"model": "grok-4", "provider": "xai", "price_note": "偏海外题材；需 XAI_API_KEY，价格未核实"},
     },
     "storyboard": {
         "draft": {"model": "doubao-seed-2-1-lite-260915", "provider": "doubao", "price_note": "~0.02 元/集"},
@@ -79,6 +81,7 @@ QUALITY_TIERS: dict[str, dict[str, dict[str, str]]] = {
     },
     "remix_rewrite": {
         "draft": {"model": "kimi-k3", "provider": "moonshot", "price_note": "~0.3 元/集"},
+        "overseas": {"model": "grok-4", "provider": "xai", "price_note": "偏海外题材；需 XAI_API_KEY，价格未核实"},
     },
     "lookdev_image": {
         "draft": {"model": "seedream_5_flash", "provider": "ark", "price_note": "0.12 元/张"},

@@ -353,8 +353,9 @@ MODEL_STORYBOARD=doubao-seed-2-1-lite-260915 PROVIDER_STORYBOARD=doubao`），�
 - 提示词盘点：剧本理解/规划/分集/分镜/导入整理/二创改写/二创关键帧识别/定妆出图 都已固定成模板，但没有版本号，
   且分散在 `script/series.py`、`script/api.py`、`remix/modes.py` 三个文件（`DIRECTOR_RULES` 单独在 api.py）。
   统一目录+版本号计划并入后台管理页一起做。
-- Grok(xai) 目前只是 vendor 管线（`VENDOR_BASE_URL`/`VENDOR_API_KEY_ENV` 里有，`XAI_API_KEY` 没配），还没有
-  进任何 `QUALITY_TIERS` 档位或前端入口；"偏海外题材剧本用 Grok" 这个用户可见接入点还没做，排在后台管理页前面。
+- Grok(xai) 现在是 `plan`/`script`/`remix_rewrite` 三个 stage 的 `tier="overseas"` 选项（见下一节），但
+  `XAI_API_KEY` 没配，真实调用 NOT_TESTED；没有专门前端入口，目前只能通过 `PlanRequest.tier`/`StageCallOptions.tier`
+  传 `"overseas"` 或 `PUT .../quality-tiers` 设成项目默认值来用。
 
 ### 质量档位（草稿/标准/高质量，2026-10-23，接在上面之后）
 
@@ -384,3 +385,9 @@ VERIFIED：`test_llm_routing.py::test_model_for_tier_precedence`/`test_tiers_for
 `test_series.py::test_stage_tiers_and_project_quality_tiers`（端点契约 + `_quality_tiers` 对 LLM 和前端视图
 都不可见 + 非法 stage 名 422）；`test_lookdev.py::test_generate_dedup_hits_cache_and_estimate`（`estimate()`
 返回真实 `model_key`/价格，`tier="draft"` 切到 seedream_5_flash/0.0167 美元）。ruff / mypy（53 个源文件）通过。
+
+另加了一档 `tier="overseas"`（`plan`/`script`/`remix_rewrite` 三个文本 stage），指向 Grok(`grok-4`/`xai`，
+复用已有的 `script_engine.VENDOR_BASE_URL["xai"]`/`VENDOR_API_KEY_ENV["xai"]="XAI_API_KEY"` 管线）；对应
+Victor 的"偏海外剧情用 Grok"。`PlanRequest.tier`/`StageCallOptions.tier` 的 Literal 加了 `"overseas"`。
+价格未核实（没有 Grok 官方价目核对，没有配 `XAI_API_KEY`），标记 NOT_TESTED。
+VERIFIED（路由逻辑，非真实调用）：`test_llm_routing.py::test_overseas_tier_routes_script_to_grok`。
