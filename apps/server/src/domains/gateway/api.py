@@ -1,23 +1,24 @@
 import logging
 import uuid
 from decimal import Decimal
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
-from pydantic import BaseModel
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from pydantic import BaseModel, Field
+from sqlalchemy import select, text
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.config import settings
 from src.db import SessionLocal
 from src.deps import Http, Session, director
 from src.domains.gateway import credit_ledger as ledger
-from src.domains.gateway import router
+from src.domains.gateway import router, routing
 from src.domains.gateway.adapters.base import ProviderError
 from src.domains.gateway.safety import ContentBlocked, check_prompt
 from src.domains.gateway.schemas import JobCreateRequest
-from src.models import CreditLedger, Job, ModelCatalog, Project, User
+from src.models import Asset, CreditLedger, Episode, Job, ModelCatalog, Project, Shot, User
 
 log = logging.getLogger(__name__)
 api = APIRouter(prefix="/api/v1")
@@ -28,7 +29,9 @@ def model_view(m: ModelCatalog) -> dict[str, Any]:
     return {"model_key": m.model_key, "display_name": m.display_name, "task_type": m.task_type,
             "is_nsfw": m.is_nsfw, "is_active": m.is_active, "credits_per_unit": str(m.credits_per_unit),
             "max_duration": m.max_duration, "max_refs": m.max_refs, "fallback_model_key": m.fallback_model_key,
-            "resolution_multipliers": m.resolution_multipliers, "health_score": str(m.health_score)}
+            "resolution_multipliers": m.resolution_multipliers, "health_score": str(m.health_score),
+            "usd_per_unit": None if m.usd_per_unit is None else str(m.usd_per_unit),
+            "usd_resolution_factors": settings.usd_resolution_factors.get(m.model_key, {})}
 
 
 def job_view(j: Job) -> dict[str, Any]:
@@ -36,7 +39,9 @@ def job_view(j: Job) -> dict[str, Any]:
             "status": j.status, "model_key": j.model_key, "task_type": j.task_type,
             "credit_estimate": str(j.credit_estimate),
             "actual_credits": None if j.actual_credits is None else str(j.actual_credits),
-            "error_message": j.error_message, "created_at": j.created_at.isoformat()}
+            "error_message": j.error_message, "created_at": j.created_at.isoformat(),
+            "usd": str(ledger.job_usd(j)), "stage": j.request_payload.get("stage"),
+            "cached_from": j.request_payload.get("cached_from")}
 
 
 @api.get("/models")
@@ -59,8 +64,9 @@ async def _dispatch_bg(job_id: uuid.UUID, client: httpx.AsyncClient) -> None:
 
 
 async def submit(req: JobCreateRequest, session: AsyncSession, bg: BackgroundTasks, http: httpx.AsyncClient,
-                 meta: dict[str, Any] | None = None) -> Job:
-    """All generation goes through here: gates, limits, pre-deduct, then queue."""
+                 meta: dict[str, Any] | None = None, force: bool = False) -> Job:
+    """All generation goes through here: gates, limits, budgets, cache, pre-deduct, then queue.
+    force=True skips the content-hash cache (a deliberate re-roll)."""
     project = await session.get(Project, req.project_id)
     if project is None:
         raise HTTPException(404, "project not found")
@@ -86,14 +92,20 @@ async def submit(req: JobCreateRequest, session: AsyncSession, bg: BackgroundTas
     if len(req.refs.image_urls) + len(req.refs.video_urls) + len(req.refs.audio_urls) > model.max_refs:
         raise HTTPException(422, f"{req.model_key} accepts at most {model.max_refs} references")
     try:
-        job = await router.create_job(session, user_id=user.id, req=req, meta=meta)
-    except (ledger.InsufficientCredits, ledger.DailyLimitExceeded) as e:
+        job = await router.create_job(session, user_id=user.id, req=req, meta=meta, force=force)
+    except (ledger.InsufficientCredits, ledger.DailyLimitExceeded, ledger.BudgetExceeded) as e:
         raise HTTPException(402, str(e)) from e
     except ledger.ModelUnavailable as e:
         raise HTTPException(422, f"model {e} unavailable") from e
     from src.domains.storyboard.shot_orchestrator import enqueue_local
     from src.queue import celery_app, queue_for
-    if model.provider == "local":
+    if job.status == "success":  # content-hash cache hit: nothing to pay or dispatch, run the follow-ups now
+        await session.close()
+        urls = {a.kind: str(a.meta.get("url") or a.s3_key) for a in (await session.execute(
+            select(Asset).where(Asset.job_id == job.id))).scalars()}
+        await session.close()
+        await router._after_success(SessionLocal, http, job, urls)
+    elif model.provider == "local":
         enqueue_local(job.task_type, str(job.id))
     elif settings.dispatch_mode == "inline":
         bg.add_task(_dispatch_bg, job.id, http)
@@ -104,8 +116,9 @@ async def submit(req: JobCreateRequest, session: AsyncSession, bg: BackgroundTas
 
 
 @api.post("/jobs", status_code=201)
-async def create_job(req: JobCreateRequest, session: Session, bg: BackgroundTasks, http: Http) -> dict[str, Any]:
-    return job_view(await submit(req, session, bg, http))
+async def create_job(req: JobCreateRequest, session: Session, bg: BackgroundTasks, http: Http,
+                     force: bool = False) -> dict[str, Any]:
+    return job_view(await submit(req, session, bg, http, force=force))
 
 
 @api.post("/webhooks/{provider}")
@@ -138,6 +151,7 @@ async def list_ledger(session: Session, user_id: uuid.UUID | None = None, limit:
 class ModelPatch(BaseModel):
     is_active: bool | None = None
     credits_per_unit: Decimal | None = None
+    usd_per_unit: Decimal | None = None
     fallback_model_key: str | None = None
 
 
@@ -153,7 +167,7 @@ async def patch_model(model_key: str, patch: ModelPatch, session: Session) -> di
     if m is None:
         raise HTTPException(404, "model not found")
     for k, v in patch.model_dump(exclude_unset=True).items():
-        if k == "credits_per_unit" and v is not None and v < 0:
+        if k in ("credits_per_unit", "usd_per_unit") and v is not None and v < 0:
             raise HTTPException(422, "price must be >= 0")
         setattr(m, k, v)
     await session.commit()
@@ -186,3 +200,182 @@ async def admin_retry(job_id: uuid.UUID, session: Session, bg: BackgroundTasks, 
     req = JobCreateRequest.model_validate(old.request_payload["request"])
     meta: dict[str, Any] = {k: old.request_payload[k] for k in ("render_tier", "chain") if k in old.request_payload}
     return job_view(await submit(req, session, bg, http, meta=meta))
+
+
+# ---- per-stage model assignment (persisted overrides on top of gateway/routing.STAGES) ----
+
+def stage_view(stage: str) -> dict[str, Any]:
+    eff, base = routing.model_for(stage), routing.STAGES[stage]
+    return {"stage": stage, "kind": eff.kind, "model": eff.model, "provider": eff.provider,
+            "resolution": eff.resolution, "note": eff.note, "overridden": eff != base,
+            "default": {"model": base.model, "provider": base.provider, "resolution": base.resolution}}
+
+
+async def load_stage_overrides(sm: async_sessionmaker[AsyncSession]) -> int:
+    """Startup: re-apply admin overrides saved in stage_overrides. Returns how many were applied."""
+    try:
+        async with sm() as s:
+            rows = (await s.execute(text("SELECT stage, model, provider, resolution, note FROM stage_overrides"))).all()
+    except DBAPIError as e:  # table not migrated yet: run with the code defaults
+        log.warning("stage overrides not loaded: %s", e)
+        return 0
+    n = 0
+    for stage, model, provider, resolution, note in rows:
+        if stage in routing.STAGES:
+            routing.set_override(stage, model=model, provider=provider or "", resolution=resolution or "",
+                                 note=note or "")
+            n += 1
+    return n
+
+
+class StageUpdate(BaseModel):
+    stage: str
+    model: str | None = Field(default=None, description="empty/null resets the stage to its code default")
+    provider: str | None = None
+    resolution: Literal["480p", "720p", "1080p"] | None = None
+    note: str | None = None
+
+
+@api.get("/admin/stages")
+async def admin_stages() -> list[dict[str, Any]]:
+    return [stage_view(s) for s in routing.STAGES]
+
+
+@api.put("/admin/stages")
+async def put_stage(body: StageUpdate, session: Session) -> dict[str, Any]:
+    if body.stage not in routing.STAGES:
+        raise HTTPException(404, f"未知环节 {body.stage}")
+    base = routing.STAGES[body.stage]
+    if not body.model:
+        await session.execute(text("DELETE FROM stage_overrides WHERE stage=:s"), {"s": body.stage})
+        await session.commit()
+        routing.set_override(body.stage)
+        return stage_view(body.stage)
+    provider = body.provider
+    if base.kind in ("image", "video"):
+        m = await session.get(ModelCatalog, body.model)
+        if m is None or not m.task_type.startswith(base.kind + "."):
+            raise HTTPException(422, f"{body.model} 不是可用的{'图片' if base.kind == 'image' else '视频'}模型")
+        provider = provider or m.provider
+    if body.resolution and base.kind != "video":
+        raise HTTPException(422, "只有视频环节可以设置分辨率")
+    await session.execute(text(
+        "INSERT INTO stage_overrides (stage, model, provider, resolution, note) VALUES (:s, :m, :p, :r, :n) "
+        "ON CONFLICT (stage) DO UPDATE SET model=:m, provider=:p, resolution=:r, note=:n, updated_at=now()"),
+        {"s": body.stage, "m": body.model, "p": provider, "r": body.resolution, "n": body.note})
+    await session.commit()
+    routing.set_override(body.stage, model=body.model, provider=provider or "", resolution=body.resolution or "",
+                         note=body.note or "")
+    return stage_view(body.stage)
+
+
+# ---- money views ----
+
+def _shot_stage(kind: str, tier: str, final: bool) -> str | None:
+    if tier == "L0_animatic":
+        return None
+    return routing.video_stage_for(kind, final=final, draft=tier == "L1_draft")
+
+
+@api.get("/projects/{project_id}/episodes/{n}/estimate")
+async def estimate_episode(project_id: uuid.UUID, n: int, session: Session,
+                           tier: Literal["L0_animatic", "L1_draft", "L2_master"] = "L2_master",
+                           final: bool = False) -> dict[str, Any]:
+    """What rendering this episode would cost with the current stage routing (credits and reference USD).
+    Keyframes: one image for every shot without a ready/approved keyframe."""
+    shots = (await session.execute(select(Shot).where(Shot.project_id == project_id, Shot.episode_number == n)
+                                   .order_by(Shot.shot_order))).scalars().all()
+    if not shots:
+        raise HTTPException(404, f"第 {n} 集还没有镜头")
+    catalog = {m.model_key: m for m in (await session.execute(select(ModelCatalog))).scalars()}
+    rows, credits, usd = [], Decimal(0), Decimal(0)
+    for s in shots:
+        stage = _shot_stage(s.shot_kind, tier, final)
+        sm = routing.model_for(stage) if stage else None
+        key = sm.model if sm else "local_animatic"
+        res = (sm.resolution if sm and sm.resolution else s.resolution)
+        m = catalog.get(key)
+        units = min(max(s.duration, 4), 30)
+        c = ledger.estimate_credits(m, units, res) if m else None
+        u = ledger.estimate_usd(m, units, res) if m else None
+        credits += c or 0
+        usd += u or 0
+        rows.append({"shot_id": str(s.id), "shot_order": s.shot_order, "shot_kind": s.shot_kind, "stage": stage,
+                     "model_key": key, "resolution": res, "seconds": units,
+                     "credits": None if c is None else str(c), "usd": None if u is None else str(u)})
+    kf = routing.model_for("keyframe_image")
+    kf_model = catalog.get(kf.model)
+    need = [s for s in shots if s.keyframe_status not in ("ready", "approved")]
+    kf_usd = ledger.estimate_usd(kf_model, 1, "720p") * len(need) if kf_model else Decimal(0)
+    ep = (await session.execute(select(Episode).where(Episode.project_id == project_id, Episode.episode_number == n))
+          ).scalar_one_or_none()
+    return {"episode_number": n, "tier": tier, "final": final, "shots": rows, "credits": str(credits),
+            "usd": str(usd), "keyframes": {"count": len(need), "model_key": kf.model, "usd": str(kf_usd)},
+            "total_usd": str(usd + kf_usd), "credit_usd": str(settings.credit_usd),
+            "budget_usd": None if ep is None or ep.budget_usd is None else str(ep.budget_usd)}
+
+
+def _job_stage(j: Job) -> str:
+    st = j.request_payload.get("stage")
+    return str(st) if st else ("post" if j.task_type.startswith("post.") else j.task_type.split(".")[0])
+
+
+@api.get("/projects/{project_id}/costs")
+async def project_costs(project_id: uuid.UUID, session: Session) -> dict[str, Any]:
+    """Reference USD per pipeline stage and per episode: settled + in flight (refunded jobs count 0)."""
+    project = await session.get(Project, project_id)
+    if project is None:
+        raise HTTPException(404, "project not found")
+    rows = (await session.execute(select(Job, Shot.episode_number).outerjoin(Shot, Shot.id == Job.shot_id)
+                                  .where(Job.project_id == project_id))).all()
+    stages: dict[str, dict[str, Any]] = {}
+    episodes: dict[int, Decimal] = {}
+    spent = flight = Decimal(0)
+    for j, ep in rows:
+        u = ledger.job_usd(j)
+        b = stages.setdefault(_job_stage(j), {"jobs": 0, "usd": Decimal(0), "in_flight_usd": Decimal(0),
+                                              "cached": 0, "failed": 0})
+        b["jobs"] += 1
+        b["cached"] += bool(j.request_payload.get("cached_from"))
+        b["failed"] += j.status in ("failed", "dead_letter", "cancelled")
+        if j.status in ledger.OPEN_STATES:
+            b["in_flight_usd"] += u
+            flight += u
+        else:
+            b["usd"] += u
+            spent += u
+        if ep is not None:
+            episodes[ep] = episodes.get(ep, Decimal(0)) + u
+    return {"project_id": str(project_id), "spent_usd": str(spent), "in_flight_usd": str(flight),
+            "total_usd": str(spent + flight),
+            "budget_usd": None if project.budget_usd is None else str(project.budget_usd),
+            "by_stage": [{"stage": k, **{f: str(v) if isinstance(v, Decimal) else v for f, v in b.items()}}
+                         for k, b in sorted(stages.items(), key=lambda kv: -(kv[1]["usd"] + kv[1]["in_flight_usd"]))],
+            "by_episode": [{"episode_number": k, "usd": str(v)} for k, v in sorted(episodes.items())]}
+
+
+class BudgetPatch(BaseModel):
+    budget_usd: Decimal | None = Field(default=None, ge=0, description="null removes the cap")
+
+
+@api.put("/projects/{project_id}/budget")
+async def set_project_budget(project_id: uuid.UUID, body: BudgetPatch, session: Session) -> dict[str, Any]:
+    p = await session.get(Project, project_id)
+    if p is None:
+        raise HTTPException(404, "project not found")
+    p.budget_usd = body.budget_usd
+    await session.commit()
+    await session.refresh(p)
+    return {"project_id": str(project_id), "budget_usd": None if p.budget_usd is None else str(p.budget_usd)}
+
+
+@api.put("/projects/{project_id}/episodes/{n}/budget")
+async def set_episode_budget(project_id: uuid.UUID, n: int, body: BudgetPatch, session: Session) -> dict[str, Any]:
+    ep = (await session.execute(select(Episode).where(Episode.project_id == project_id, Episode.episode_number == n))
+          ).scalar_one_or_none()
+    if ep is None:
+        raise HTTPException(404, f"第 {n} 集不存在")
+    ep.budget_usd = body.budget_usd
+    await session.commit()
+    await session.refresh(ep)
+    return {"episode_number": n, "budget_usd": None if ep.budget_usd is None else str(ep.budget_usd)}

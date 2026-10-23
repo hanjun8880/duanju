@@ -8,6 +8,15 @@ class Settings(BaseSettings):
     storage_dir: str = "./storage"  # local media root served at /media (MinIO/S3 not wired yet)
     default_username: str = "director"
     whisper_size: str = "large-v3"
+    # money: 1 credit = credit_usd dollars, used only for models without model_catalog.usd_per_unit
+    credit_usd: float = 0.01
+    daily_budget_usd: float | None = None  # all projects, per calendar day (DB clock); None = off
+    # USD price factor per resolution, relative to the price usd_per_unit is quoted at (720p unless noted).
+    # Third-party reference prices 2026-10, NOT verified against vendor price lists. Override with env JSON.
+    usd_resolution_factors: dict[str, dict[str, float]] = {
+        "seedance_2_5_spicy": {"480p": 0.4, "720p": 1.0, "1080p": round(0.569 / 0.231, 4)},
+        "wan3_spicy": {"720p": 1.0, "1080p": round(0.165 / 0.083, 4)},
+    }
 
 
 settings = Settings()
