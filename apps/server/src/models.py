@@ -52,6 +52,7 @@ class ModelCatalog(Base):
     max_concurrency: Mapped[int]
     health_score: Mapped[Decimal] = mapped_column(Numeric(5, 2))
     is_active: Mapped[bool]
+    usd_per_unit: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
 
 
 class Template(Base):
@@ -80,6 +81,7 @@ class Project(Base):
     series_bible_json: Mapped[Json] = mapped_column(server_default="{}")
     source_novel_text: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(32), server_default="draft")
+    budget_usd: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
     created_at: Mapped[datetime] = created()
 
 
@@ -94,6 +96,8 @@ class LookdevAsset(Base):
     ref_urls: Mapped[list[Any]] = mapped_column(server_default="[]")
     face_embedding_url: Mapped[str | None] = mapped_column(String(512))
     meta: Mapped[Json] = mapped_column(server_default="{}")
+    locked_ref_urls: Mapped[list[Any]] = mapped_column(server_default="[]")
+    voice: Mapped[Json] = mapped_column(server_default="{}")
     created_at: Mapped[datetime] = created()
 
 
@@ -107,6 +111,7 @@ class Episode(Base):
     source_segments: Mapped[list[Any]] = mapped_column(server_default="[]")
     script_text: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(32), server_default="outlined")
+    budget_usd: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
     created_at: Mapped[datetime] = created()
 
 
@@ -128,6 +133,12 @@ class Shot(Base):
     refs: Mapped[Json] = mapped_column(server_default='{"images": [], "videos": [], "audios": []}')
     source_remix_meta: Mapped[Json | None]
     status: Mapped[str] = mapped_column(String(32), server_default="pending")
+    shot_kind: Mapped[str] = mapped_column(String(16), server_default="dialogue")
+    continuous_from_prev: Mapped[bool] = mapped_column(server_default=text("false"))
+    keyframe_url: Mapped[str | None] = mapped_column(String(512))
+    keyframe_status: Mapped[str] = mapped_column(String(16), server_default="none")
+    selected_job_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("jobs.id", ondelete="SET NULL"))
+    content_hash: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = created()
 
 
@@ -144,6 +155,7 @@ class Job(Base):
     actual_credits: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
     status: Mapped[str] = mapped_column(String(32), server_default="queued")
     error_message: Mapped[str | None] = mapped_column(Text)
+    content_hash: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = created()
     completed_at: Mapped[datetime | None]
 
