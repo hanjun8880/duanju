@@ -71,8 +71,12 @@ const KINDS: { id: Kind; label: string; hint: string }[] = [
   { id: "video", label: "原片二创", hint: "本机切镜、转写台词、抽关键帧，再由视觉模型识别画面，变成可改编的文本。" },
 ];
 
-/** Novels often come as GB18030 .txt; try strict UTF-8 first. */
+/** Novels often come as GB18030 .txt; try strict UTF-8 first. Word/PDF go to the server to extract. */
 async function readText(file: File): Promise<string> {
+  if (/\.(pdf|docx)$/i.test(file.name)) {
+    const fd = new FormData(); fd.append("file", file);
+    return (await api<{ text: string }>("/source/extract-file", { method: "POST", body: fd })).text;
+  }
   const buf = await file.arrayBuffer();
   try { return new TextDecoder("utf-8", { fatal: true }).decode(buf); } catch { return new TextDecoder("gb18030").decode(buf); }
 }
@@ -86,6 +90,7 @@ function SourcePanel({ project, onChanged }: { project: Project; onChanged: () =
   }, [watch, detail.data, onChanged]);
   const [kind, setKind] = useState<Kind>("novel");
   const [text, setText] = useState("");
+  const [url, setUrl] = useState("");
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const run = async (fn: () => Promise<string>) => {
@@ -97,9 +102,25 @@ function SourcePanel({ project, onChanged }: { project: Project; onChanged: () =
     await api(`/projects/${project.id}`, { method: "PATCH", json: { source_novel_text: text } });
     return `已保存 ${text.length.toLocaleString()} 字。下一步去「剧本」生成剧集圣经与分集大纲。`;
   });
+  const fetchUrl = () => run(async () => {
+    const r = await api<{ text: string }>("/source/fetch-url", { method: "POST", json: { url } });
+    setText((t) => (t.trim() ? `${t}\n\n${r.text}` : r.text));
+    return `已抓取 ${r.text.length.toLocaleString()} 字正文，记得点「保存为本剧素材」。`;
+  });
+  const importFile = (file: File) => run(async () => {
+    setText(await readText(file));
+    return `已读入《${file.name}》，记得点「保存为本剧素材」。`;
+  });
+  const [lastVideoPath, setLastVideoPath] = useState<string | null>(null);
+  const retryRemix = (video_path: string) => run(async () => {
+    await api(`/projects/${project.id}/remix`, { method: "POST", json: { video_path } });
+    setWatch(true);
+    return "已重新提交拆解，不用重新上传。";
+  });
   const remix = (file: File) => run(async () => {
     const fd = new FormData(); fd.append("file", file);
     const up = await api<{ path: string }>("/uploads", { method: "POST", body: fd });
+    setLastVideoPath(up.path);
     await api(`/projects/${project.id}/remix`, { method: "POST", json: { video_path: up.path } });
     setWatch(true);
     return "原片已进入本地拆解队列。完成后，逐镜头的画面描述和台词会成为本项目的素材文本。";
@@ -119,15 +140,19 @@ function SourcePanel({ project, onChanged }: { project: Project; onChanged: () =
           <input type="file" accept="video/*" disabled={busy} onChange={(e) => e.target.files?.[0] && remix(e.target.files[0])} />
         </label>
       ) : (
-        <div className="space-y-2">
-          <textarea className={`field ${kind === "novel" ? "h-64" : "h-28"} leading-7`} value={text} onChange={(e) => setText(e.target.value)}
-            placeholder={kind === "novel" ? "粘贴小说原文，或从下方选择 txt 文件" : "例如：一个落魄画师在宋代汴京的雨夜，捡到一卷会改写命运的长卷"} />
-          <div className="flex flex-wrap items-center gap-3">
-            {kind === "novel" && (
-              <label className="btn btn-quiet file-pick">选择 txt 文件
-                <input type="file" accept=".txt,text/plain" onChange={async (e) => { const f = e.target.files?.[0]; if (f) setText(await readText(f)); }} />
+        <div className="space-y-3">
+          {kind === "novel" && (
+            <div className="flex flex-wrap items-center gap-2">
+              <input className="field w-auto min-w-0 flex-1" inputMode="url" placeholder="https:// 粘贴小说/剧本网页链接" value={url} onChange={(e) => setUrl(e.target.value)} />
+              <button className="btn btn-quiet" disabled={!url.trim() || busy} onClick={fetchUrl}>抓取正文</button>
+              <label className={`btn btn-quiet file-pick ${busy ? "opacity-45" : ""}`}>导入文件
+                <input type="file" accept=".txt,.pdf,.docx,text/plain" disabled={busy} onChange={(e) => { const f = e.target.files?.[0]; if (f) importFile(f); e.target.value = ""; }} />
               </label>
-            )}
+            </div>
+          )}
+          <textarea className={`field ${kind === "novel" ? "h-64" : "h-28"} leading-7`} value={text} onChange={(e) => setText(e.target.value)}
+            placeholder={kind === "novel" ? "粘贴小说正文，或用上方「抓取正文」「导入文件」" : "例如：一个落魄画师在宋代汴京的雨夜，捡到一卷会改写命运的长卷"} />
+          <div className="flex flex-wrap items-center gap-3">
             <button className="btn" disabled={!text.trim() || busy} onClick={save}>保存为本剧素材</button>
             {text && <span className="text-sm text-ink-soft">{text.length.toLocaleString()} 字</span>}
           </div>
@@ -135,7 +160,13 @@ function SourcePanel({ project, onChanged }: { project: Project; onChanged: () =
       )}
       {msg && <p className={msg.ok ? "text-ink" : "text-seal"} role="status">{msg.text}</p>}
       {watch && <p className="text-sm text-dawn" role="status">原片拆解中，完成后自动刷新…</p>}
-      {detail.data?.status === "remix_failed" && <p className="text-seal" role="status">原片拆解失败。确认是 mp4 或 mov 且带音轨后重新上传；详细原因在后台日志里。</p>}
+      {detail.data?.status === "remix_failed" && (
+        <p className="text-seal" role="status">
+          原片拆解失败。
+          {lastVideoPath ? <button className="ml-1 underline" disabled={busy} onClick={() => retryRemix(lastVideoPath)}>重试</button> : "确认是 mp4 或 mov 且带音轨后重新上传。"}
+          {lastVideoPath && "；仍失败就换一个文件重新上传。"}
+        </p>
+      )}
       {detail.data?.has_source_text && (
         <div className="silk border border-celadon-deep/70 p-4">
           <div className="mb-2 flex items-baseline justify-between gap-4">

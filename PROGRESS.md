@@ -96,3 +96,24 @@
 - `DISPATCH_MODE=celery` 下服务重启不自动恢复轮询（inline 模式会恢复）。
 - 素材存本地 `STORAGE_DIR`，未接 S3/MinIO。
 - 价格为占位值，需按方舟账单校准 `model_catalog`。
+
+## Phase 5 — 对照 91generate 补齐剧本功能 + 全流程细节打磨（已完成）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 网页链接抓取正文（lxml 去导航/页眉页脚，保留标题与正文块） | VERIFIED | `test_source_import.py`；真机抓取并保存 |
+| 导入 Word / PDF 文本（pypdf、python-docx） | VERIFIED | 同上；真机上传 docx 验证 |
+| 剧本页「生成剧本」：创作方向（可选文本）接入剧集规划提示词 | PASS | `test_series.py::test_plan_prompt_*` 扩展 |
+| 剧本页「生成剧本」：集数 2–14 快捷选择 + 每集约90秒/合计时长展示，留空即 AI 按内容判断 | VERIFIED | 截图 `desk-script.png` |
+| 剧本页「导入剧本」：直接采用原文 / 按原文整理成剧本（Claude 重排格式不改剧情）/ 强制采用原文（整段不拆集） | VERIFIED | 真机导入 2 集样例剧本，分集与标题正确；`test_source_import.py` 6 项 |
+| 定妆出图、分镜逐镜/整集渲染、成片合成：防重复提交 | VERIFIED | 真机连续两次点击同一按钮，网络请求数均为 1（首版用 React state 判断仍有竞态，已改用同步 ref 锁 `useBusySet`） |
+| 剧本/分镜文本框失焦保存：从静默失败改为失败即提示 | VERIFIED | 代码审查 + 真机触发失败路径 |
+| 列表类页面区分"加载中"与"确实没有数据" | VERIFIED | `useApi` 新增 `loading` 字段，分镜/成片/定妆页接入 |
+| 原片拆解失败：加"重试"按钮，复用已上传文件不必重新选择 | VERIFIED | 真机构造拆解失败，点击重试后重新入队 |
+
+后端合计 112 passed（新增 21 项）；`ruff`、`mypy`、`pnpm tsc`、`pnpm test:run`（6）、`pnpm build` 通过。全部 5 个页面桌面 1440 / 移动 390 截图复核，无 console 错误、无横向溢出。
+
+### 已知限制
+- 网页正文抓取是启发式（按块级标签长度过滤导航/按钮文案），非完整 readability 算法；复杂排版页面可能需要手动贴正文兜底。
+- 「按原文整理成剧本」需要 ANTHROPIC_API_KEY；未配置时明确报错，不是静默失败。
+- 原片拆解用的 faster-whisper 模型较大时，在资源受限环境可能被系统杀进程；生产环境需要给 worker 预留足够内存。

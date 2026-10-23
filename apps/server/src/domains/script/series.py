@@ -13,6 +13,13 @@ from src.domains.script.script_engine import EpisodeOutline, SeriesPlan
 MAX_SOURCE_CHARS = 300_000  # shortcut: one planning call; split very long novels into volumes (分卷) for now
 CHUNK = 3000
 CHAPTER = re.compile(r"^\s*(第[0-9０-９零〇一二三四五六七八九十百千万两]+[章回节卷集]|chapter\s+\d+)", re.IGNORECASE | re.MULTILINE)
+EPISODE_MARK = re.compile(r"^\s*第[0-9０-９零〇一二三四五六七八九十百千万两]+集", re.MULTILINE)
+
+REFORMAT_RULES = (
+    "你是短剧编剧。把输入文本整理成可直接拍摄的分场剧本，不改变剧情、台词内容和人物，只整理格式。"
+    "格式：每场以「场N 日/夜 内/外 地点」开头，下面是动作描写和「角色名：台词」。台词口语化、短句。"
+    "所有角色均为虚构成年人。"
+)
 
 PLAN_RULES = (
     "你是连续剧总编剧兼制片人，把输入的小说原文、视频转写或一句创意，改编成竖屏 AI 短剧连续剧。"
@@ -55,12 +62,33 @@ def split_source(text: str) -> list[str]:
     return parts
 
 
-def plan_prompt(segments: list[str], episode_count: int | None) -> str:
+def split_episodes(text: str) -> list[str]:
+    """Strict split for an already-written script: only explicit '第N集' markers, no size fallback."""
+    text = text.replace("\r\n", "\n").strip()
+    if not text:
+        return []
+    starts = [m.start() for m in EPISODE_MARK.finditer(text)]
+    if len(starts) < 2:
+        return [text]
+    if starts[0] > 0:
+        starts.insert(0, 0)
+    return [p for p in (text[a:b].strip() for a, b in zip(starts, [*starts[1:], len(text)], strict=True)) if p]
+
+
+def episode_title(segment: str, n: int) -> str:
+    mark = EPISODE_MARK.match(segment)
+    first_line = segment.split("\n", 1)[0].strip()
+    rest = first_line[mark.end():].strip() if mark else first_line
+    return rest if 0 < len(rest) <= 30 else f"第{n}集"
+
+
+def plan_prompt(segments: list[str], episode_count: int | None, direction: str | None = None) -> str:
     n = f"共 {episode_count} 集" if episode_count else "集数按内容体量自定（通常每 1-2 个片段一集）"
+    d = f"\n创作方向：{direction}" if direction and direction.strip() else ""
     if len(segments) == 1 and len(segments[0]) < 600:
-        return f"原创创意（{n}）：\n{segments[0]}"
+        return f"原创创意（{n}）：\n{segments[0]}{d}"
     body = "\n\n".join(f"【片段 {i}】\n{s}" for i, s in enumerate(segments, 1))
-    return f"改编以下原文为连续剧（{n}）：\n\n{body}"
+    return f"改编以下原文为连续剧（{n}）：{d}\n\n{body}"
 
 
 def bible_from_plan(plan: SeriesPlan) -> dict[str, Any]:

@@ -12,8 +12,8 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
-from src.deps import Session, director
-from src.domains.script import series
+from src.deps import Http, Session, director
+from src.domains.script import series, source_import
 from src.domains.script.script_engine import (
     CachedDirectorLLM,
     EpisodeScript,
@@ -158,6 +158,34 @@ async def upload(file: UploadFile) -> dict[str, str]:
     return {"url": f"/media/uploads/{name}", "path": str(dest / name)}
 
 
+@api.post("/source/extract-file")
+async def extract_file(file: UploadFile) -> dict[str, str]:
+    """TXT/PDF/DOCX -> plain text, for the 导入文件 button. No project yet, so nothing is stored here."""
+    try:
+        text = source_import.extract_file_text(file.filename or "", await file.read())
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+    if not text.strip():
+        raise HTTPException(422, "文件里没有可提取的文字")
+    return {"text": text}
+
+
+class FetchUrlRequest(BaseModel):
+    url: str
+
+
+@api.post("/source/fetch-url")
+async def fetch_url(body: FetchUrlRequest, client: Http) -> dict[str, str]:
+    """Webpage -> main body text, for the 抓取正文 button. Only this page, no auto-pagination."""
+    try:
+        text = await source_import.fetch_url_text(client, body.url)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+    except Exception as e:
+        raise HTTPException(422, f"抓取失败：{e}") from e
+    return {"text": text}
+
+
 class RemixRequest(BaseModel):
     video_path: str
 
@@ -203,6 +231,7 @@ def episode_view(e: Episode) -> dict[str, Any]:
 
 class PlanRequest(BaseModel):
     episode_count: int | None = Field(default=None, ge=1, le=200)
+    direction: str | None = Field(default=None, max_length=500, description="创作方向：类型、剧情偏好等，可选")
     replace: bool = False
 
 
@@ -225,7 +254,8 @@ async def plan_series(project_id: uuid.UUID, body: PlanRequest, session: Session
     mode = p.content_mode
     await session.close()
     plan: SeriesPlan = await _llm(CachedDirectorLLM().structured(
-        SeriesPlan, series.PLAN_RULES, {}, series.plan_prompt(segments, body.episode_count), mode, effort="high"))
+        SeriesPlan, series.PLAN_RULES, {}, series.plan_prompt(segments, body.episode_count, body.direction),
+        mode, effort="high"))
     async with session.begin():
         p = await session.get(Project, project_id, with_for_update=True)
         assert p is not None
@@ -251,6 +281,50 @@ async def plan_series(project_id: uuid.UUID, body: PlanRequest, session: Session
 async def list_episodes(project_id: uuid.UUID, session: Session) -> list[dict[str, Any]]:
     return [episode_view(e) for e in (await session.execute(select(Episode).where(
         Episode.project_id == project_id).order_by(Episode.episode_number))).scalars()]
+
+
+class ImportScriptRequest(BaseModel):
+    text: str = Field(min_length=1)
+    mode: Literal["as_is", "ai_format", "force_as_is"] = "as_is"
+    replace: bool = False
+
+
+@api.post("/projects/{project_id}/episodes/import", status_code=201)
+async def import_script(project_id: uuid.UUID, body: ImportScriptRequest, session: Session) -> dict[str, Any]:
+    """Already-written script -> episodes directly, skipping the series-bible planning call.
+    as_is/force_as_is: split on '第N集' markers (force: never split, the whole text is episode 1) and keep
+    the text verbatim. ai_format: same split, then Claude reformats each segment into shooting-script form
+    without changing plot or dialogue."""
+    p = await session.get(Project, project_id)
+    if p is None:
+        raise HTTPException(404, "project not found")
+    existing = (await session.execute(select(Episode.id).where(Episode.project_id == project_id))).scalars().all()
+    if existing and not body.replace:
+        raise HTTPException(409, "episodes already exist; pass replace=true to overwrite")
+    segments = [body.text.strip()] if body.mode == "force_as_is" else series.split_episodes(body.text)
+    if not segments:
+        raise HTTPException(422, "text is empty")
+    if body.mode == "ai_format":
+        _need_llm(p)
+        mode = p.content_mode
+        await session.close()
+        reformatted: list[str] = []
+        for seg in segments:
+            out: EpisodeScript = await _llm(CachedDirectorLLM().structured(
+                EpisodeScript, series.REFORMAT_RULES, {}, seg, mode))
+            reformatted.append(out.script_text)
+        segments = reformatted
+    else:
+        await session.close()
+    async with session.begin():
+        p = await session.get(Project, project_id, with_for_update=True)
+        assert p is not None
+        p.source_novel_text, p.status = body.text, "scripted"
+        await session.execute(delete(Episode).where(Episode.project_id == project_id))
+        session.add_all([Episode(project_id=project_id, episode_number=i, title=series.episode_title(seg, i),
+                                 synopsis="", script_text=seg, status="scripted")
+                         for i, seg in enumerate(segments, 1)])
+    return {"episodes": len(segments)}
 
 
 async def _episode(session: AsyncSession, project_id: uuid.UUID, n: int) -> Episode:

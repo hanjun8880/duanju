@@ -1,6 +1,6 @@
 "use client";
 import { Fragment, useMemo, useState } from "react";
-import { api, useApi } from "@/lib/api";
+import { api, useApi, useBusySet } from "@/lib/api";
 import type { Episode, Job, Model, Project, Shot, Tier } from "@/lib/contracts";
 import { estimateCredits, tierPlan } from "@/lib/estimate";
 import { useWorkbench } from "@/lib/store";
@@ -19,6 +19,8 @@ export function StoryboardCanvas({ project, onSpent }: { project: Project; onSpe
   const models = useApi<Model[]>("/models");
   const { chain, setChain, episode, setEpisode } = useWorkbench();
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const { busy: pending, run } = useBusySet<string>(); // shot ids, plus "all" while a whole-episode render is in flight
+  const allBusy = pending.has("all");
   const episodes = useMemo(() => [...new Set([...(shots.data ?? []).map((s) => s.episode_number),
     ...(outlines.data ?? []).map((e) => e.episode_number)])].sort((a, b) => a - b), [shots.data, outlines.data]);
   const title = outlines.data?.find((e) => e.episode_number === episode)?.title;
@@ -33,25 +35,32 @@ export function StoryboardCanvas({ project, onSpent }: { project: Project; onSpe
   const total = (tier: Tier) => list.reduce((acc, s) => acc + cost(tier, s), 0);
   const seconds = list.reduce((a, s) => a + s.duration, 0);
 
-  const render = async (s: Shot, tier: Tier) => {
-    try {
-      const job = await api<Job>(`/shots/${s.id}/render`, { method: "POST", json: { tier, chain } });
-      setMsg({ ok: true, text: `第 ${s.shot_order} 镜已提交${TIERS.find((t) => t.id === tier)?.label}渲染，预扣 ${Number(job.credit_estimate).toFixed(1)} 积分` });
-      onSpent(); shots.reload();
-    } catch (e) { setMsg({ ok: false, text: `第 ${s.shot_order} 镜未提交：${(e as Error).message}` }); }
+  const render = (s: Shot, tier: Tier) => {
+    if (allBusy) return;
+    run(s.id, async () => {
+      try {
+        const job = await api<Job>(`/shots/${s.id}/render`, { method: "POST", json: { tier, chain } });
+        setMsg({ ok: true, text: `第 ${s.shot_order} 镜已提交${TIERS.find((t) => t.id === tier)?.label}渲染，预扣 ${Number(job.credit_estimate).toFixed(1)} 积分` });
+        onSpent(); shots.reload();
+      } catch (e) { setMsg({ ok: false, text: `第 ${s.shot_order} 镜未提交：${(e as Error).message}` }); }
+    });
   };
-  const renderAll = async (tier: Tier) => {
-    try {
-      const r = await api<{ jobs: Job[]; mode: string }>(`/projects/${project.id}/episodes/${episode}/render`, { method: "POST", json: { tier, chain } });
-      const spent = r.jobs.reduce((a, j) => a + Number(j.credit_estimate), 0);
-      setMsg({ ok: true, text: r.mode === "sequential"
-        ? `整集母带按尾帧接力逐镜出片，已提交第 1 镜（预扣 ${spent.toFixed(1)} 积分），后续镜头自动接上`
-        : `已提交 ${r.jobs.length} 个镜头${TIERS.find((t) => t.id === tier)?.label}，预扣 ${spent.toFixed(1)} 积分` });
-      onSpent(); shots.reload();
-    } catch (e) { setMsg({ ok: false, text: (e as Error).message }); }
+  const renderAll = (tier: Tier) => {
+    run("all", async () => {
+      try {
+        const r = await api<{ jobs: Job[]; mode: string }>(`/projects/${project.id}/episodes/${episode}/render`, { method: "POST", json: { tier, chain } });
+        const spent = r.jobs.reduce((a, j) => a + Number(j.credit_estimate), 0);
+        setMsg({ ok: true, text: r.mode === "sequential"
+          ? `整集母带按尾帧接力逐镜出片，已提交第 1 镜（预扣 ${spent.toFixed(1)} 积分），后续镜头自动接上`
+          : `已提交 ${r.jobs.length} 个镜头${TIERS.find((t) => t.id === tier)?.label}，预扣 ${spent.toFixed(1)} 积分` });
+        onSpent(); shots.reload();
+      } catch (e) { setMsg({ ok: false, text: (e as Error).message }); }
+    });
   };
   const savePrompt = async (s: Shot, shot_prompt: string) => {
-    if (shot_prompt !== s.shot_prompt && shot_prompt.trim()) await api(`/shots/${s.id}`, { method: "PATCH", json: { shot_prompt } });
+    if (shot_prompt === s.shot_prompt || !shot_prompt.trim()) return;
+    try { await api(`/shots/${s.id}`, { method: "PATCH", json: { shot_prompt } }); }
+    catch (e) { setMsg({ ok: false, text: `第 ${s.shot_order} 镜描述未保存：${(e as Error).message}` }); }
   };
 
   return (
@@ -79,13 +88,15 @@ export function StoryboardCanvas({ project, onSpent }: { project: Project; onSpe
       {list.length > 0 && (
         <div className="mb-6 flex flex-wrap items-center gap-3" role="group" aria-label="整集出片">
           <span className="text-ink-soft">整集出片</span>
-          <button className="btn btn-quiet" onClick={() => renderAll("L0_animatic")}>故事板（免费）</button>
-          <button className="btn btn-quiet" onClick={() => renderAll("L1_draft")}>草稿 {total("L1_draft").toFixed(1)}</button>
-          <button className="btn" onClick={() => renderAll("L2_master")}>母带 {total("L2_master").toFixed(1)}</button>
+          <button className="btn btn-quiet" disabled={allBusy} onClick={() => renderAll("L0_animatic")}>故事板（免费）</button>
+          <button className="btn btn-quiet" disabled={allBusy} onClick={() => renderAll("L1_draft")}>草稿 {total("L1_draft").toFixed(1)}</button>
+          <button className="btn" disabled={allBusy} onClick={() => renderAll("L2_master")}>{allBusy ? "提交中…" : `母带 ${total("L2_master").toFixed(1)}`}</button>
         </div>
       )}
       {msg && <p className={`mb-4 ${msg.ok ? "text-ink" : "text-seal"}`} role="status">{msg.text}</p>}
-      {list.length === 0 ? (
+      {shots.loading ? (
+        <p className="text-ink-soft">分镜加载中…</p>
+      ) : list.length === 0 ? (
         <p className="text-ink-soft">本集还没有分镜。去「剧本」里写好本集剧本并拆成分镜。</p>
       ) : (
         <div className="silk -mx-4 overflow-x-auto border-y border-celadon-deep/70 px-4 py-6 sm:-mx-8 sm:px-8" role="list" aria-label="分镜长卷">
@@ -93,7 +104,7 @@ export function StoryboardCanvas({ project, onSpent }: { project: Project; onSpe
             {list.map((s, i) => (
               <Fragment key={s.id}>
                 {i > 0 && <Thread on={chain} passed={!!list[i - 1].last_frame_url} />}
-                <ShotPanel shot={s} cost={cost} onRender={render} onPrompt={savePrompt} />
+                <ShotPanel shot={s} cost={cost} onRender={render} onPrompt={savePrompt} busy={pending.has(s.id) || allBusy} />
               </Fragment>
             ))}
           </div>
@@ -112,8 +123,8 @@ function Thread({ on, passed }: { on: boolean; passed: boolean }) {
   );
 }
 
-function ShotPanel({ shot, cost, onRender, onPrompt }: {
-  shot: Shot; cost: (t: Tier, s: Shot) => number; onRender: (s: Shot, t: Tier) => void; onPrompt: (s: Shot, p: string) => void;
+function ShotPanel({ shot, cost, onRender, onPrompt, busy }: {
+  shot: Shot; cost: (t: Tier, s: Shot) => number; onRender: (s: Shot, t: Tier) => void; onPrompt: (s: Shot, p: string) => void; busy: boolean;
 }) {
   const cover = shot.last_frame_url ?? shot.first_frame_url ?? shot.refs.images?.[0];
   const done = TIERS.findIndex((t) => shot.status === `rendered_${t.id}`);
@@ -138,8 +149,8 @@ function ShotPanel({ shot, cost, onRender, onPrompt }: {
       <ol className="mt-3 grid grid-cols-4 border border-celadon-deep" aria-label="渲染阶梯">
         {TIERS.map((t, i) => (
           <li key={t.id} className={i ? "border-l border-celadon-deep" : ""}>
-            <button onClick={() => onRender(shot, t.id)} title={`${t.label}，${t.note}`}
-              className={`flex w-full flex-col items-center py-1.5 text-sm hover:bg-celadon ${i <= done ? "bg-ink text-paper hover:bg-ink" : ""}`}>
+            <button onClick={() => onRender(shot, t.id)} disabled={busy} title={`${t.label}，${t.note}`}
+              className={`flex w-full flex-col items-center py-1.5 text-sm hover:bg-celadon disabled:opacity-50 ${i <= done ? "bg-ink text-paper hover:bg-ink" : ""}`}>
               <span>{t.label}</span>
               <span className="text-xs opacity-75">{cost(t.id, shot) ? cost(t.id, shot).toFixed(1) : "免费"}</span>
             </button>

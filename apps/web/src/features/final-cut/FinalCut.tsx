@@ -1,6 +1,6 @@
 "use client";
 import { useMemo, useState } from "react";
-import { api, useApi } from "@/lib/api";
+import { api, useApi, useBusySet } from "@/lib/api";
 import type { Episode, Output, Project, Shot } from "@/lib/contracts";
 
 export function FinalCut({ project }: { project: Project }) {
@@ -8,6 +8,7 @@ export function FinalCut({ project }: { project: Project }) {
   const shots = useApi<Shot[]>(`/projects/${project.id}/shots`, 8000);
   const outputs = useApi<Output[]>(`/projects/${project.id}/outputs`, 5000);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const { busy: assembling, run } = useBusySet<number | "series">();
 
   const ready = useMemo(() => {
     const m = new Map<number, { done: number; total: number }>();
@@ -22,11 +23,13 @@ export function FinalCut({ project }: { project: Project }) {
   const latest = (n: number) => outputs.data?.find((o) => o.kind === "episode" && o.meta.episode_number === n);
   const series = outputs.data?.find((o) => o.kind === "series");
 
-  const assemble = async (episode_number: number | null) => {
-    try {
-      await api(`/projects/${project.id}/assemble`, { method: "POST", json: { episode_number } });
-      setMsg({ ok: true, text: episode_number ? `第 ${episode_number} 集正在本地合成` : "整部连续剧正在本地合成" });
-    } catch (e) { setMsg({ ok: false, text: (e as Error).message }); }
+  const assemble = (episode_number: number | null) => {
+    run(episode_number ?? "series", async () => {
+      try {
+        await api(`/projects/${project.id}/assemble`, { method: "POST", json: { episode_number } });
+        setMsg({ ok: true, text: episode_number ? `第 ${episode_number} 集正在本地合成` : "整部连续剧正在本地合成" });
+      } catch (e) { setMsg({ ok: false, text: (e as Error).message }); }
+    });
   };
 
   return (
@@ -36,7 +39,7 @@ export function FinalCut({ project }: { project: Project }) {
           <h2 className="text-2xl font-semibold">成片</h2>
           <p className="mt-1 leading-7 text-ink-soft">每个镜头取最高一档的成品（4K、母带、草稿、故事板依次优先），按分镜顺序拼成一集；整部按集数顺序串起来。同时导出 OTIO 时间线，可在剪辑软件里继续精修。</p>
         </div>
-        <button className="btn" disabled={!outputs.data?.some((o) => o.kind === "episode")} onClick={() => assemble(null)}>导出整部连续剧</button>
+        <button className="btn" disabled={!outputs.data?.some((o) => o.kind === "episode") || assembling.has("series")} onClick={() => assemble(null)}>{assembling.has("series") ? "合成中…" : "导出整部连续剧"}</button>
       </section>
       {msg && <p className={msg.ok ? "text-ink" : "text-seal"} role="status">{msg.text}</p>}
       {series && (
@@ -46,7 +49,8 @@ export function FinalCut({ project }: { project: Project }) {
           <a className="mt-2 inline-block text-sm underline" href={series.url} download>下载整部 mp4</a>
         </section>
       )}
-      {numbers.length === 0 ? <p className="text-ink-soft">还没有分集。先在「剧本」里生成分集并拆分镜。</p> : (
+      {episodes.loading || shots.loading ? <p className="text-ink-soft">加载中…</p> :
+       numbers.length === 0 ? <p className="text-ink-soft">还没有分集。先在「剧本」里生成分集并拆分镜。</p> : (
         <ul className="grid gap-8 sm:grid-cols-2 xl:grid-cols-4">
           {numbers.map((n) => {
             const r = ready.get(n) ?? { done: 0, total: 0 };
@@ -63,7 +67,7 @@ export function FinalCut({ project }: { project: Project }) {
                     <p className="p-4 text-sm text-ink-soft">{r.done ? "镜头已就绪，可以合成本集。" : "本集还没有出片的镜头。"}</p>}
                 </div>
                 <div className="mt-2 flex items-center gap-3">
-                  <button className="btn btn-quiet" disabled={!r.done} onClick={() => assemble(n)}>{out ? "重新合成" : "合成本集"}</button>
+                  <button className="btn btn-quiet" disabled={!r.done || assembling.has(n)} onClick={() => assemble(n)}>{assembling.has(n) ? "合成中…" : out ? "重新合成" : "合成本集"}</button>
                   {out && <a className="text-sm underline" href={out.url} download>下载</a>}
                   {out && out.meta.shots_used !== undefined && out.meta.shots_used < (out.meta.shots_total ?? 0) &&
                     <span className="text-xs text-seal">缺 {(out.meta.shots_total ?? 0) - out.meta.shots_used} 镜</span>}
