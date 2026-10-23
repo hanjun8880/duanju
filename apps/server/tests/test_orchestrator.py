@@ -71,11 +71,65 @@ async def test_master_chains_previous_last_frame(sessionmaker, user_and_project)
         first = await s.get(Shot, shots[0].id)
         assert first is not None
         first.last_frame_url = "https://v/last1.png"
+    # 审查意见 P0 改写：旧断言要求任何下一镜都用上一镜尾帧作首帧（并因首帧/参考互斥而丢掉全部参考图）。
+    # 现在只有 continuous_from_prev=true 的镜头才接上一镜尾帧，其它镜头无首帧、走参考图模式。
+    async with sessionmaker() as s:
+        cut = await orch.shot_request(s, shots[1].id, "L2_master", chain=True)
+    assert cut.first_frame_url is None and cut.refs.image_urls  # hard cut keeps its character refs
+    async with sessionmaker() as s, s.begin():
+        second = await s.get(Shot, shots[1].id)
+        assert second is not None
+        second.continuous_from_prev = True
+        second.first_frame_url = "https://stale/ignored.png"
     async with sessionmaker() as s:
         chained = await orch.shot_request(s, shots[1].id, "L2_master", chain=True)
         unchained = await orch.shot_request(s, shots[1].id, "L2_master", chain=False)
     assert chained.first_frame_url == "https://v/last1.png" and not chained.refs.any()
     assert unchained.first_frame_url is None
+
+
+async def test_first_frame_only_from_approved_keyframe(sessionmaker, user_and_project):
+    _, pid = user_and_project
+    await seed_lookdev(sessionmaker, pid)
+    async with sessionmaker() as s:
+        shots = await orch.import_storyboard(s, pid, 1, BOARD)
+    async with sessionmaker() as s, s.begin():
+        first = await s.get(Shot, shots[0].id)
+        assert first is not None
+        first.keyframe_url, first.keyframe_status = "https://k/1.png", "ready"
+        first.first_frame_url = "https://stale/manual.png"  # stray value must not leak in as a first frame
+    async with sessionmaker() as s:
+        pending = await orch.shot_request(s, shots[0].id, "L2_master")
+    assert pending.first_frame_url is None and pending.refs.image_urls
+    async with sessionmaker() as s, s.begin():
+        first = await s.get(Shot, shots[0].id)
+        assert first is not None
+        first.keyframe_status = "approved"
+    async with sessionmaker() as s:
+        approved = await orch.shot_request(s, shots[0].id, "L2_master")
+        draft = await orch.shot_request(s, shots[0].id, "L1_draft")
+    assert approved.first_frame_url == "https://k/1.png"
+    assert draft.first_frame_url == "https://k/1.png"
+
+
+async def test_last_frame_only_written_to_continuous_next(sessionmaker, user_and_project):
+    _, pid = user_and_project
+    async with sessionmaker() as s:
+        shots = await orch.import_storyboard(s, pid, 1, BOARD)
+    async with sessionmaker() as s:
+        await orch.on_shot_rendered(s, shots[0].id, "L2_master", "https://v/a.png", chain=True)
+    async with sessionmaker() as s:
+        nxt = await s.get(Shot, shots[1].id)
+        assert nxt is not None and nxt.first_frame_url is None
+    async with sessionmaker() as s, s.begin():
+        nxt = await s.get(Shot, shots[1].id)
+        assert nxt is not None
+        nxt.continuous_from_prev = True
+    async with sessionmaker() as s:
+        await orch.on_shot_rendered(s, shots[0].id, "L2_master", "https://v/b.png", chain=True)
+    async with sessionmaker() as s:
+        nxt = await s.get(Shot, shots[1].id)
+        assert nxt is not None and nxt.first_frame_url == "https://v/b.png"
 
 
 async def test_render_and_callback_propagates_last_frame(engine, sessionmaker, user_and_project, vendor):  # noqa: F811
@@ -85,6 +139,10 @@ async def test_render_and_callback_propagates_last_frame(engine, sessionmaker, u
         await conn.execute(text("UPDATE users SET credits=1000, daily_limit_credits=1000 WHERE id=:u"), {"u": uid})
     async with sessionmaker() as s:
         shots = await orch.import_storyboard(s, pid, 1, BOARD)
+    async with sessionmaker() as s, s.begin():  # 审查意见 P0：只有连续镜头才接尾帧，这里显式标记第 2 镜连续
+        second = await s.get(Shot, shots[1].id)
+        assert second is not None
+        second.continuous_from_prev = True
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.post(f"/api/v1/shots/{shots[0].id}/render", json={"tier": "L2_master", "chain": True})
         assert r.status_code == 201, r.text

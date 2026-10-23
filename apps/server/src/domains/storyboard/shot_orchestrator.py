@@ -61,6 +61,19 @@ def role_prefix(bound: list[dict[str, Any]]) -> str:
     return " ".join(f"[参考图{rng(*x['range'])}: {x['name']} {TYPE_LABEL.get(x['type'], x['type'])}]" for x in bound)
 
 
+def first_frame_for(shot: Shot, prev: Shot | None, chain: bool, tier: str) -> str | None:
+    """A first frame only from an approved keyframe, or the previous shot's last frame for a continuous shot.
+
+    Anything else (a hard cut, a keyframe not yet approved) renders in reference-image mode so the character
+    refs reach the model: first-frame mode and multi-ref are mutually exclusive (schemas rule 2).
+    """
+    if shot.keyframe_status == "approved" and shot.keyframe_url:
+        return shot.keyframe_url
+    if tier == "L2_master" and chain and shot.continuous_from_prev:
+        return (prev.last_frame_url if prev else None) or shot.first_frame_url
+    return None
+
+
 async def shot_request(session: AsyncSession, shot_id: uuid.UUID, tier: str, chain: bool = True) -> JobCreateRequest:
     shot = await session.get(Shot, shot_id)
     if shot is None:
@@ -80,14 +93,15 @@ async def shot_request(session: AsyncSession, shot_id: uuid.UUID, tier: str, cha
                             "prompt": prompt, "negative_prompt": template.negative_prompt if template else None,
                             "refs": MultimodalRefs(image_urls=images[:MAX_IMAGES], video_urls=refs.get("videos", []),
                                                    audio_urls=refs.get("audios", []))}
+    first = first_frame_for(shot, prev, chain, tier)
     if tier == "L1_draft":  # 480p draft: verify blocking & camera cheaply before paying for 1080p
         return JobCreateRequest(**base, model_key=DRAFT_MODEL, resolution="480p",
-                                duration=min(max(shot.duration, 4), 30), generate_audio=False, return_last_frame=False)
+                                duration=min(max(shot.duration, 4), 30), generate_audio=False, return_last_frame=False,
+                                first_frame_url=first)
     if tier == "L2_master":
-        first = shot.first_frame_url or (prev.last_frame_url if prev else None)
         return JobCreateRequest(**base, model_key=MASTER_MODEL, resolution="1080p",
                                 duration=min(max(shot.duration, 4), 30), return_last_frame=True,
-                                first_frame_url=first if chain else None)
+                                first_frame_url=first)
     raise ValueError(f"{tier} is not a cloud render tier")
 
 
@@ -104,7 +118,7 @@ async def on_shot_rendered(session: AsyncSession, shot_id: uuid.UUID, tier: str,
             nxt = (await session.execute(select(Shot).where(
                 Shot.project_id == shot.project_id, Shot.episode_number == shot.episode_number,
                 Shot.shot_order > shot.shot_order).order_by(Shot.shot_order).limit(1))).scalar_one_or_none()
-            if nxt is not None:
+            if nxt is not None and nxt.continuous_from_prev:  # hard cuts keep reference-image mode
                 nxt.first_frame_url = last_frame_url
 
 
