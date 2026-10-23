@@ -260,3 +260,35 @@
 ### 已知限制
 - 节奏表钩子是规则判断（开场 3 秒内有台词或切镜、连续 ≥2 个短于平均一半的镜头、末镜），非语义识别。
 - fork 只复制 establishing 镜头，剧情镜头需重新分镜；fork+二创只传父项目大纲与圣经，不传全文。
+
+## 集成（hark/base，2026-10-23）
+
+六个分支按 script → lookdev → render → ledger → voice → remix 顺序 `--no-ff` 合并；合并前在各自 worktree 重跑全量（script 128 / lookdev 122 / render 119 / ledger 127 / voice 174 / remix 137，全绿，与各组报告一致）。每合一个跑一次全量并提交（128 → 138 → 145 → 160 → 222 → 247），接缝修完后 257。
+
+| 接缝 | 处理 | 状态 | 证据 |
+|---|---|---|---|
+| 迁移链 | `0007_ledger` 改名 `0008_ledger`（down_revision=`0007_script`）；新增 `0009_integration`（`tts` 占位 model_catalog 行）。线性链 0006 → 0007_script → 0008_ledger → 0009_integration | VERIFIED | 空库 `duanju_integ_mig`：`alembic upgrade head` → `0009_integration (head)`，llm_* 7 行、usd 价 8 行、stage_overrides 表在；`downgrade 0006` 再 `upgrade head` 往返通过 |
+| import_storyboard | 两组字段都保留：shot_kind / continuous_from_prev（首镜强制 false）/ speaker_asset_id + `refs.asset_names` | PASS | `test_import_storyboard_writes_kind_continuity_and_speaker`、`test_refs_bound_late_from_locked_assets` |
+| 参考图唯一规则 | 删除 shot_orchestrator 临时 `refs_for_episode`，改用 `lookdev/refs.py`；`refs_for_episode` 内加 remix 合规闸门（`meta.redesign_required` → 不绑定），`compliance.bindable_refs` 同规则（未锁定只给 1 张候选）；关键帧 `keyframe_request` 改走 `orch.bind_refs_late(cap=模型 max_refs)`（迟绑定 + 分集造型 + 合规），删掉 keyframes 自己的 `asset_refs` | PASS | `test_redesign_required_binds_nothing_for_video_or_keyframe`、`test_keyframe_refs_bound_late_with_episode_look`、原 `test_keyframes.py` |
+| 原生音频 | L2 请求 `generate_audio=settings.video_native_audio`（默认 false；L1 本就 false） | PASS | `test_master_generate_audio_follows_video_native_audio` |
+| force + 内容哈希缓存 | `RenderRequest.force` → `_cloud_render` → `submit(force=)` → `create_job`；强制时 payload 记 `forced`，批量链 `render_next/_queue_shot/on_render_failed` 与 failover 继续透传；`_queue_shot` 命中缓存（job 已 success）时调 `router.run_cached_followups`（= 读资产 URL + `_after_success`），镜头状态更新并继续下一镜；`submit` 的缓存分支也改用同一函数。lookdev 的 `force` 也透传到 gateway（否则重抽被 ledger 缓存吞掉——合并 ledger 时 `test_generate_dedup_hits_cache_and_estimate` 因此红过） | PASS | `test_batch_cache_hit_still_advances_to_next_shot`、`test_batch_force_skips_cache_and_carries_to_later_shots`、`test_render_api_force_flag` |
+| 非渲染 jobs | `RENDER_TASK`（video.* / post.* / face.swap）过滤 `best_clips`、`shot_takes`；`/shots/{id}/select` 拒绝非渲染 job；重新分镜的"已有渲染"守卫只看渲染 job（llm/tts/关键帧不再挡） | PASS | `test_non_render_jobs_stay_out_of_takes_and_count_in_costs` |
+| 花费汇总 | `job_usd` 对 `llm.*` / `tts` 用 payload.usd（此前按 0 积分算成 $0）；`/projects/{id}/costs` 每个环节带 `phase`，新增 `by_phase`（编剧 script / 二创 remix / lookdev / keyframe / video / voice / post）；remix 的改写与原片识别也记 `llm.remix_*`（此前未记账，且 stage 误用默认 storyboard 路由）；remix 预估价表改读 `settings.llm_prices`（不再两份价表） | PASS | 同上 + `test_remix_rewrite_is_ledgered_on_its_stage` |
+| TTS 记账 | `speak` 未命中缓存且有项目时写一条 0 积分 jobs（`task_type='tts'`，model_key `tts`，payload：provider/chars/usd/price_verified=false）；单价 `settings.tts_usd_per_char`（volc 0.00004 / minimax 0.0001 / local 0 美元每字，占位未核实，env `TTS_USD_PER_CHAR`）；assemble 对白轨、`/voice/preview`（带 asset_id 时）、`/voice/shots/{id}` 都记 | PASS | `test_tts_cache_miss_writes_one_zero_credit_job` |
+| 前端 | `tierPlan` 按路由：L1=草稿路由 480p，L2 按 shot_kind 720p（对白 seedance、动作/空镜/插入 wan3），final 才 1080p，`GET /admin/stages` 覆盖生效；KeyframeReview 挂到分镜页（长卷下方）；各组临时类型（ShotX/Take、JobX/ModelX/StageRow、money 类型、Lookdev*/Remix*、PlanProgress/LlmUsage）统一进 `contracts.ts`，新增 zod `RenderRequest` 并入 contracts 测试；按惯例重生成 `openapi.json`（`app.openapi()` 紧凑 JSON）；`remixApi.remove` 改走 `api()`（原裸 fetch 不带 Bearer，开鉴权后会 401）；账本"花费"页加按大类一行 | PASS（tsc + vitest 24 + `pnpm build`）/ 浏览器 NOT_TESTED | `estimate.test.ts`（改写 L2 断言，见下）、`contracts.test.ts` |
+| compose | worker 命令加 `-I src.domains.remix.tasks` | PASS | `docker compose config -q` |
+| main.py | 鉴权中间件、auth/gateway/script/lookdev/storyboard/keyframes/voice/remix 路由、lifespan `load_stage_overrides` 全在 | PASS | `test_main_wires_every_router_and_auth` |
+
+最终：后端 257 passed，ruff、mypy（52 个源文件）通过；前端 `pnpm tsc`、`pnpm test:run`（24）、`pnpm build` 通过。真实供应商调用仍全部 BLOCKED（无密钥）。
+
+### 改动的旧测试
+- `test_orchestrator.py::test_tier_requests`：合并冲突，取 render 组版本，时长按 script 组改后的 BOARD（10 秒）。
+- `test_orchestrator.py` 两个 `fake_queue` 桩加 `force=False` 形参（`_queue_shot` 新增 force 参数，断言不变）。
+- `web/src/lib/estimate.test.ts`：L2 默认从 seedance 1080p 改为按路由 720p（审查要求 + render/ledger 组都已注明旧估价偏高）。
+
+### 遗留
+- 预算闸门现在把 LLM/TTS 花费也算进项目预算（tts 挂在镜头上，也算集预算）；若只想管视频钱需要再按 phase 过滤。
+- fork 继承的空镜 `source_remix_meta.clip_path` 仍不进 `best_clips`（remix 组已注明），合成时用不上继承的成片。
+- 动画样片（L0）仍用导入时快照的 `refs.images[0]`，不走迟绑定（免费本地出图，不影响付费参考）。
+- compose worker 只监听 seedance/wan 视频队列；若在模型分工里把某环节改成 minimax_h3，需要给 worker 加 `video.minimax_h3`。
+- TTS / LLM / Seedance 等单价都是占位或第三方参考价，未核实。
