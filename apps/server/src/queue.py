@@ -103,8 +103,10 @@ def assemble(job_id: str) -> str:
     """Episode master (best clip per shot) or whole series (latest master per episode)."""
     from sqlalchemy import select
 
+    from src import media
     from src.domains.storyboard import post
     from src.domains.storyboard import shot_orchestrator as orch
+    from src.domains.voice import service as voice
     from src.models import Asset, Project, Shot
 
     async def run(sm: SM) -> str:
@@ -112,7 +114,14 @@ def assemble(job_id: str) -> str:
             job = await s.get(Job, uuid.UUID(job_id))
             assert job is not None
             ep = job.request_payload.get("episode_number")
+            p = job.request_payload
         meta: dict[str, Any] = {"episode_number": ep}
+        mix: dict[str, Any] = {}  # episode only; a series export re-joins already-mixed episodes
+        if ep is not None:
+            bgm = media.local_path(p["bgm_url"]) if p.get("bgm_url") else None
+            mix = {"audio_mode": p.get("audio_mode") or voice.default_audio_mode(),
+                   "bgm": str(bgm) if bgm else None, "subtitles": p.get("subtitles", True)}
+            meta["audio_mode"] = mix["audio_mode"]
 
         async def work(sm: SM, job: Any, out_dir: Path) -> str:
             async with sm() as s:
@@ -120,11 +129,17 @@ def assemble(job_id: str) -> str:
                 assert project is not None
                 if ep is not None:
                     best = await orch.best_clips(s, job.project_id, ep)
-                    order = (await s.execute(select(Shot.id).where(Shot.project_id == job.project_id,
-                                                                   Shot.episode_number == ep)
-                                             .order_by(Shot.shot_order))).scalars().all()
+                    shots = list((await s.execute(select(Shot).where(Shot.project_id == job.project_id,
+                                                                     Shot.episode_number == ep)
+                                                  .order_by(Shot.shot_order))).scalars().all())
+                    order = [sh.id for sh in shots]
                     clips = [str(best[i]) for i in order if i in best]
                     meta["shots_total"], meta["shots_used"] = len(order), len(clips)
+                    async with httpx.AsyncClient() as client:  # dialogue track: character TTS (cached)
+                        mix["lines"], notes = await voice.dialogue_lines(s, client, shots, best, mix["audio_mode"])
+                    meta["dialogue_lines"] = sum(1 for x in mix["lines"] if x is not None)
+                    if notes:
+                        meta["tts_notes"] = notes
                 else:
                     latest: dict[int, str] = {}
                     for a in (await s.execute(select(Asset).where(Asset.project_id == job.project_id,
@@ -140,7 +155,7 @@ def assemble(job_id: str) -> str:
             name = f"EP{ep:02d}" if ep is not None else "SERIES"
             size = post.SIZES.get(project.aspect_ratio, (1080, 1920))
             return await asyncio.to_thread(post.assemble_episode, clips, str(out_dir / f"{name}_{job.id}.mp4"),
-                                           str(out_dir / f"{name}_{job.id}.otio"), name, size)
+                                           str(out_dir / f"{name}_{job.id}.otio"), name, size, **mix)
         return await _local_job(sm, job_id, work, kind="episode" if ep is not None else "series", meta=meta)
     return str(_run(run))
 

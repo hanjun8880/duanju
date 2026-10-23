@@ -121,6 +121,10 @@ async def render_episode(project_id: uuid.UUID, n: int, body: RenderRequest, ses
 
 class AssembleRequest(BaseModel):
     episode_number: int | None = Field(default=None, ge=1, description="omit to export the whole series")
+    audio_mode: Literal["tts", "native", "mix"] | None = Field(
+        default=None, description="dialogue track; default tts (native when VIDEO_NATIVE_AUDIO=true)")
+    bgm_url: str | None = Field(default=None, description="a /media audio file, looped and ducked under dialogue")
+    subtitles: bool = True
 
 
 @api.post("/projects/{project_id}/assemble", status_code=202)
@@ -129,6 +133,8 @@ async def assemble(project_id: uuid.UUID, body: AssembleRequest, session: Sessio
     project = await session.get(Project, project_id)
     if project is None:
         raise HTTPException(404, "project not found")
+    if body.bgm_url and media.local_path(body.bgm_url) is None:
+        raise HTTPException(422, "bgm_url must be an uploaded /media audio file")
     if body.episode_number is not None:
         clips = await orch.best_clips(session, project_id, body.episode_number)
         if not clips:
@@ -140,7 +146,8 @@ async def assemble(project_id: uuid.UUID, body: AssembleRequest, session: Sessio
     await session.close()
     job = await ledger.create_job_with_prededuct(
         session, user_id=project.user_id, project_id=project_id, model_key="local_assemble", task_type="post.assemble",
-        request_payload={"episode_number": body.episode_number}, billable_units=1, resolution="1080p")
+        request_payload={"episode_number": body.episode_number, "audio_mode": body.audio_mode,
+                         "bgm_url": body.bgm_url, "subtitles": body.subtitles}, billable_units=1, resolution="1080p")
     orch.enqueue_local("post.assemble", str(job.id))
     return {**job_view(job), "queue": "local_post"}
 

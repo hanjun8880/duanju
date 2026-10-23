@@ -75,3 +75,41 @@ async def speak(client: httpx.AsyncClient, text: str, v: Voice) -> Spoken:
         tmp.replace(hit)  # atomic: a concurrent reader never sees half a file
     dur = await asyncio.to_thread(_duration, hit)
     return Spoken(media.url_for(hit), str(hit), dur, cached, v.provider, v.fallback_from, key)
+
+
+def default_audio_mode() -> str:
+    from src.config import settings
+    return "native" if settings.video_native_audio else "tts"
+
+
+async def dialogue_lines(session: Any, client: httpx.AsyncClient, shots: list[Any], clips: dict[Any, Path],
+                         audio_mode: str) -> tuple[list[Any], list[dict[str, Any]]]:
+    """One post.Line (or None) per shot that has a clip, in order. TTS only when the mode uses it; a failing
+    vendor falls back to local espeak for that line (reported in the returned notes, not hidden)."""
+    from src.domains.storyboard.post import Line
+    from src.domains.voice.providers import TTSError
+    from src.models import LookdevAsset
+    lines: list[Any] = []
+    notes: list[dict[str, Any]] = []
+    for sh in shots:
+        if sh.id not in clips:
+            continue
+        text = spoken_text(sh.dialogue_transcript)
+        if not text:
+            lines.append(None)
+            continue
+        burned = clips[sh.id].name.endswith("_animatic.mp4")  # L0 animatics already burn their subtitle
+        audio = None
+        if audio_mode != "native":
+            speaker = await session.get(LookdevAsset, sh.speaker_asset_id) if sh.speaker_asset_id else None
+            v = resolve_voice(speaker.voice if speaker else None)
+            try:
+                spoken = await speak(client, text, v)
+            except TTSError as e:
+                notes.append({"shot_id": str(sh.id), "provider": v.provider, "error": str(e)[:200]})
+                spoken = await speak(client, text, Voice("local", fallback_from=v.provider))
+            if spoken.fallback_from:
+                notes.append({"shot_id": str(sh.id), "fallback_from": spoken.fallback_from})
+            audio = spoken.path
+        lines.append(Line(text, audio, subtitle=not burned))
+    return lines, notes
