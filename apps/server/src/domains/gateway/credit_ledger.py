@@ -70,6 +70,9 @@ def job_usd(job: Job) -> Decimal:
     if job.status not in ("success", *OPEN_STATES):
         return Decimal(0)
     raw = job.request_payload.get("usd_estimate")
+    if raw is None and (job.task_type.startswith("llm.") or job.task_type == "tts"):
+        raw = job.request_payload.get("usd") or 0  # token / character priced, zero credits; unpriced -> 0
+        return Decimal(str(raw)).quantize(Q)
     est = Decimal(raw) if raw is not None else job.credit_estimate * Decimal(str(settings.credit_usd))
     if job.status == "success" and job.actual_credits is not None and job.credit_estimate:
         return (est * job.actual_credits / job.credit_estimate).quantize(Q)

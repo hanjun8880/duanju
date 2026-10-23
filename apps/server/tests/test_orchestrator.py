@@ -126,7 +126,7 @@ async def test_failed_chain_skips_to_next_cut(sessionmaker, user_and_project, mo
     shots = await batch_shots(sessionmaker, pid)
     queued = []
 
-    async def fake_queue(sm, client, shot_id, tier, chain, final):
+    async def fake_queue(sm, client, shot_id, tier, chain, final, force=False):
         queued.append((shot_id, tier, chain, final))
         return shot_id
     monkeypatch.setattr(orch, "_queue_shot", fake_queue)
@@ -147,7 +147,7 @@ async def test_batch_failover_keeps_batch_and_dead_vendors_resume_at_cut(
     shots = await batch_shots(sessionmaker, pid)
     queued = []
 
-    async def fake_queue(sm, client, shot_id, tier, chain, final):
+    async def fake_queue(sm, client, shot_id, tier, chain, final, force=False):
         queued.append(shot_id)
         return shot_id
     monkeypatch.setattr(orch, "_queue_shot", fake_queue)

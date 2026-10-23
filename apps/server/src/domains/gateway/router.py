@@ -83,6 +83,8 @@ async def create_job(session: AsyncSession, *, user_id: uuid.UUID, req: JobCreat
     payload: dict[str, Any] = {**meta, "request": req.model_dump(mode="json"), "task_type": task,
                                "canonical": canonical, "billable_units": req.billable_units(),
                                "resolution": req.resolution, "stage": stage}
+    if force:  # remembered so an episode batch keeps re-rolling past the cache on every later shot
+        payload["forced"] = True
     h = content_hash(key, task, canonical)
     if failover_of:
         payload["failover_of"] = str(failover_of)
@@ -114,7 +116,8 @@ async def _shot_failed(sm: async_sessionmaker[AsyncSession], client: httpx.Async
     from src.domains.storyboard import shot_orchestrator as orch
     try:
         await orch.on_render_failed(sm, client, job.shot_id, p["render_tier"], chain=bool(p.get("chain")),
-                                    final=bool(p.get("final")), batch=bool(p.get("batch")))
+                                    final=bool(p.get("final")), batch=bool(p.get("batch")),
+                                    force=bool(p.get("forced")))
     except Exception:  # never mask the original provider error
         log.exception("after-failure handling for shot %s", job.shot_id)
 
@@ -128,8 +131,8 @@ async def _failover(sm: async_sessionmaker[AsyncSession], job: Job, model: Model
         owner = (await s.execute(select(Project.user_id).where(Project.id == job.project_id))).scalar_one()
     req = JobCreateRequest.model_validate(job.request_payload["request"])
     async with sm() as s:
-        meta: dict[str, Any] = {k: job.request_payload[k] for k in ("render_tier", "chain", "batch", "final")
-                                if k in job.request_payload}
+        meta: dict[str, Any] = {k: job.request_payload[k] for k in ("render_tier", "chain", "batch", "final",
+                                                                    "forced") if k in job.request_payload}
         new = await create_job(s, user_id=owner, req=req, model_key=model.fallback_model_key, failover_of=job.id,
                                meta=meta)
     log.warning("failover %s -> %s (%s)", job.model_key, new.model_key, error)
@@ -283,7 +286,16 @@ async def _after_success(sm: async_sessionmaker[AsyncSession], client: httpx.Asy
             await orch.on_shot_rendered(s, job.shot_id, p["render_tier"], urls.get("last_frame"), bool(p.get("chain")))
         if p.get("batch"):
             await orch.render_next(sm, client, job.shot_id, p["render_tier"], bool(p.get("chain")),
-                                   bool(p.get("final")))
+                                   bool(p.get("final")), force=bool(p.get("forced")))
+
+
+async def run_cached_followups(sm: async_sessionmaker[AsyncSession], client: httpx.AsyncClient, job: Job) -> None:
+    """A content-hash cache hit is born 'success' and never reaches a vendor or callback, so fire the same
+    follow-ups a settled render would (look-dev candidate, keyframe, shot status, next shot of a batch)."""
+    async with sm() as s:
+        urls = {a.kind: str(a.meta.get("url") or a.s3_key) for a in (await s.execute(
+            select(Asset).where(Asset.job_id == job.id))).scalars()}
+    await _after_success(sm, client, job, urls)
 
 
 async def queue_dispatch(sm: async_sessionmaker[AsyncSession], client: httpx.AsyncClient, job: Job,

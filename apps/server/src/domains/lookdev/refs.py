@@ -24,7 +24,11 @@ def look_covers(look: dict[str, Any], episode: int) -> bool:
 
 async def refs_for_episode(session: AsyncSession, asset: LookdevAsset, episode: int) -> list[str]:
     """Episode look (range covers the episode, has locked stills) > asset lock > first candidate > nothing.
+    Remix compliance (domains/remix/compliance.py): a character taken from external footage
+    (meta.redesign_required) binds nothing until it has been redesigned.
     `session` is kept in the signature so callers stay stable if looks move to their own table."""
+    if (asset.meta or {}).get("redesign_required"):
+        return []
     for look in (asset.meta or {}).get("looks") or []:
         if isinstance(look, dict) and look.get("locked") and look_covers(look, episode):
             return [str(u) for u in look["locked"]][:MAX_LOCKED]

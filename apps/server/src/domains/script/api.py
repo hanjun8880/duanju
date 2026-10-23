@@ -154,7 +154,8 @@ async def _replaceable_shots(session: AsyncSession, project_id: uuid.UUID, episo
                                                        Shot.episode_number == episode))).scalars().all()
     if not ids:
         return
-    if (await session.execute(select(Job.id).where(Job.shot_id.in_(ids)).limit(1))).first():
+    # only render jobs count: llm/tts/keyframe rows don't make a shot "rendered" (jobs.shot_id is SET NULL on delete)
+    if (await session.execute(select(Job.id).where(Job.shot_id.in_(ids), orch.RENDER_TASK).limit(1))).first():
         raise HTTPException(409, f"episode {episode} already has rendered shots; edit them instead of replacing")
     await session.execute(delete(Shot).where(Shot.id.in_(ids)))
     await session.commit()

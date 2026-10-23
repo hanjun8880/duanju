@@ -111,7 +111,7 @@ async def rewrite(llm: CachedDirectorLLM, spec: RemixSpec, source_text: str, rhy
     check_prompt(directions_text(spec), content_mode, {"stage": "remix_rewrite"})
     prompt = rewrite_prompt(spec, source_text, rhythm, external, parent_episodes)
     plan = await llm.structured(SeriesPlan, REWRITE_RULES, bible, prompt, content_mode, effort="high",
-                                model=model_for("remix_rewrite").model)
+                                model=model_for("remix_rewrite").model, stage="remix_rewrite")
     _check_plan(plan, content_mode)
     for i, e in enumerate(plan.episodes, 1):
         e.episode_number = i

@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     video_native_audio: bool = False
     app_token: str = ""  # Bearer token for every API call; empty = auth off (local dev / tests only)
     media_ticket_ttl: int = 12 * 3600  # seconds a login's /media cookie stays valid
+    # TTS USD per spoken character, by provider. PLACEHOLDERS, not verified against vendor price lists; override
+    # with env TTS_USD_PER_CHAR as JSON. Only cache misses are paid (and ledgered as task_type='tts' jobs).
+    tts_usd_per_char: dict[str, float] = {"volc": 0.00004, "minimax": 0.0001, "local": 0.0}
 
 
 settings = Settings()

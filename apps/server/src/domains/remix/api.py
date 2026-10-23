@@ -16,7 +16,7 @@ from src.domains.gateway.routing import model_for
 from src.domains.gateway.safety import ContentBlocked
 from src.domains.remix import compliance, dedupe, fork, modes, rhythm, tasks
 from src.domains.remix.modes import RemixSpec
-from src.domains.script import series
+from src.domains.script import series, usage
 from src.domains.script.api import project_view
 from src.domains.script.script_engine import CachedDirectorLLM, LLMRefused, SeriesPlan
 from src.domains.storyboard import shot_orchestrator as orch
@@ -147,10 +147,11 @@ class GenerateRequest(BaseModel):
 
 
 async def _rewrite(spec: RemixSpec, text: str, rh: dict[str, Any], bible: dict[str, Any], mode: str,
-                   external: bool, parent_eps: list[dict[str, Any]] | None = None) -> SeriesPlan:
+                   external: bool, parent_eps: list[dict[str, Any]] | None = None,
+                   bill_to: uuid.UUID | None = None) -> SeriesPlan:
+    llm = make_llm(model_for("remix_rewrite").model)
     try:
-        return await modes.rewrite(make_llm(model_for("remix_rewrite").model), spec, text, rh, bible, mode,
-                                   external, parent_eps)
+        return await modes.rewrite(llm, spec, text, rh, bible, mode, external, parent_eps)
     except ContentBlocked as e:
         raise HTTPException(422, str(e)) from e
     except LLMRefused as e:
@@ -159,6 +160,9 @@ async def _rewrite(spec: RemixSpec, text: str, rh: dict[str, Any], bible: dict[s
         raise HTTPException(422, str(e)) from e
     except RuntimeError as e:
         raise HTTPException(503, str(e)) from e
+    finally:  # ledgered as llm.remix_rewrite on the project the remix came from (or the fork it made)
+        if bill_to is not None:
+            await usage.record_llm_calls(bill_to, llm.calls)
 
 
 @api.post("/projects/{project_id}/generate", status_code=201)
@@ -176,7 +180,7 @@ async def generate(project_id: uuid.UUID, body: GenerateRequest, session: Sessio
     rh = rhythm.series_rhythm(per_ep)
     mode, user_id, aspect, src_title = p.content_mode, p.user_id, p.aspect_ratio, p.title
     await session.close()
-    plan = await _rewrite(body.spec, text, rh, {"rhythm": rh}, mode, external=True)
+    plan = await _rewrite(body.spec, text, rh, {"rhythm": rh}, mode, external=True, bill_to=project_id)
     async with session.begin():
         src = await session.get(Project, project_id, with_for_update=True)
         assert src is not None
@@ -220,7 +224,7 @@ async def fork_project(body: ForkRequest, session: Session) -> dict[str, Any]:
         bible = new.series_bible_json
         await session.close()
         plan = await _rewrite(body.spec, "", bible.get("rhythm") or {}, bible, new.content_mode, external=False,
-                              parent_eps=parent_eps)
+                              parent_eps=parent_eps, bill_to=new.id)
         await fork.apply_plan(session, new.id, plan, body.spec)
     n = (await session.execute(select(func.count()).select_from(Episode).where(
         Episode.project_id == new.id))).scalar_one()

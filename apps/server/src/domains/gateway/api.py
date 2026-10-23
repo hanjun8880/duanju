@@ -18,7 +18,7 @@ from src.domains.gateway import router, routing
 from src.domains.gateway.adapters.base import ProviderError
 from src.domains.gateway.safety import ContentBlocked, check_prompt
 from src.domains.gateway.schemas import JobCreateRequest
-from src.models import Asset, CreditLedger, Episode, Job, ModelCatalog, Project, Shot, User
+from src.models import CreditLedger, Episode, Job, ModelCatalog, Project, Shot, User
 
 log = logging.getLogger(__name__)
 api = APIRouter(prefix="/api/v1")
@@ -101,10 +101,7 @@ async def submit(req: JobCreateRequest, session: AsyncSession, bg: BackgroundTas
     from src.queue import celery_app, queue_for
     if job.status == "success":  # content-hash cache hit: nothing to pay or dispatch, run the follow-ups now
         await session.close()
-        urls = {a.kind: str(a.meta.get("url") or a.s3_key) for a in (await session.execute(
-            select(Asset).where(Asset.job_id == job.id))).scalars()}
-        await session.close()
-        await router._after_success(SessionLocal, http, job, urls)
+        await router.run_cached_followups(SessionLocal, http, job)
     elif model.provider == "local":
         enqueue_local(job.task_type, str(job.id))
     elif settings.dispatch_mode == "inline":
@@ -317,7 +314,23 @@ async def estimate_episode(project_id: uuid.UUID, n: int, session: Session,
 
 def _job_stage(j: Job) -> str:
     st = j.request_payload.get("stage")
+    if j.task_type.startswith("llm."):
+        return str(st or j.task_type.removeprefix("llm."))
     return str(st) if st else ("post" if j.task_type.startswith("post.") else j.task_type.split(".")[0])
+
+
+PHASES = {"summarize": "script", "plan": "script", "script": "script", "storyboard": "script", "reformat": "script",
+          "remix_vision": "remix", "remix_rewrite": "remix", "lookdev_image": "lookdev", "keyframe_image": "keyframe",
+          "tts": "voice", "post": "post"}
+
+
+def _phase(stage: str, task_type: str) -> str:
+    """Coarse pipeline phase for the cost summary: 编剧 script / 二创 remix / lookdev / keyframe / video / voice / post."""
+    if stage in PHASES:
+        return PHASES[stage]
+    if task_type.startswith("llm."):
+        return "remix" if stage.startswith("remix") else "script"
+    return "video" if stage.startswith("video") or task_type.startswith("video.") else stage
 
 
 @api.get("/projects/{project_id}/costs")
@@ -329,12 +342,15 @@ async def project_costs(project_id: uuid.UUID, session: Session) -> dict[str, An
     rows = (await session.execute(select(Job, Shot.episode_number).outerjoin(Shot, Shot.id == Job.shot_id)
                                   .where(Job.project_id == project_id))).all()
     stages: dict[str, dict[str, Any]] = {}
+    phases: dict[str, Decimal] = {}
     episodes: dict[int, Decimal] = {}
     spent = flight = Decimal(0)
     for j, ep in rows:
         u = ledger.job_usd(j)
-        b = stages.setdefault(_job_stage(j), {"jobs": 0, "usd": Decimal(0), "in_flight_usd": Decimal(0),
-                                              "cached": 0, "failed": 0})
+        st = _job_stage(j)
+        b = stages.setdefault(st, {"phase": _phase(st, j.task_type), "jobs": 0, "usd": Decimal(0),
+                                   "in_flight_usd": Decimal(0), "cached": 0, "failed": 0})
+        phases[b["phase"]] = phases.get(b["phase"], Decimal(0)) + u
         b["jobs"] += 1
         b["cached"] += bool(j.request_payload.get("cached_from"))
         b["failed"] += j.status in ("failed", "dead_letter", "cancelled")
@@ -351,6 +367,7 @@ async def project_costs(project_id: uuid.UUID, session: Session) -> dict[str, An
             "budget_usd": None if project.budget_usd is None else str(project.budget_usd),
             "by_stage": [{"stage": k, **{f: str(v) if isinstance(v, Decimal) else v for f, v in b.items()}}
                          for k, b in sorted(stages.items(), key=lambda kv: -(kv[1]["usd"] + kv[1]["in_flight_usd"]))],
+            "by_phase": [{"phase": k, "usd": str(v)} for k, v in sorted(phases.items(), key=lambda kv: -kv[1])],
             "by_episode": [{"episode_number": k, "usd": str(v)} for k, v in sorted(episodes.items())]}
 
 

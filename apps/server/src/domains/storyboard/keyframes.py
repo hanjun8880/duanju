@@ -3,22 +3,16 @@
 import uuid
 from typing import Any, cast, get_args
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.domains.gateway.routing import model_for
 from src.domains.gateway.schemas import JobCreateRequest, MultimodalRefs
-from src.models import LookdevAsset, ModelCatalog, Project, Shot
+from src.domains.storyboard import shot_orchestrator as orch
+from src.models import ModelCatalog, Project, Shot
 
 TYPE_LABEL = {"character": "人物", "prop": "道具", "scene": "场景"}
 STATUSES = ("none", "pending", "ready", "approved", "rejected")
 RATIOS = set(get_args(JobCreateRequest.model_fields["aspect_ratio"].annotation)) - {"adaptive"}
-
-
-def asset_refs(a: LookdevAsset) -> list[str]:
-    """Locked refs (max 3) when the look is locked, else only the newest candidate."""
-    locked = list(a.locked_ref_urls or [])
-    return locked[:3] if locked else list(a.ref_urls or [])[:1]
 
 
 async def keyframe_request(session: AsyncSession, shot: Shot) -> JobCreateRequest:
@@ -27,20 +21,11 @@ async def keyframe_request(session: AsyncSession, shot: Shot) -> JobCreateReques
     stage = model_for("keyframe_image")
     model = await session.get(ModelCatalog, stage.model)
     cap = model.max_refs if model is not None else 3
-    bound = [x for x in (shot.refs or {}).get("assets", []) if x.get("id")]
-    rows = {a.id: a for a in (await session.execute(select(LookdevAsset).where(
-        LookdevAsset.id.in_([uuid.UUID(x["id"]) for x in bound])))).scalars()} if bound else {}
-    images: list[str] = []
-    labels: list[str] = []
-    for x in bound:
-        a = rows.get(uuid.UUID(x["id"]))
-        urls = asset_refs(a)[: max(cap - len(images), 0)] if a else []
-        if not urls or a is None:
-            continue
-        lo, hi = len(images) + 1, len(images) + len(urls)
-        labels.append(f"[参考图{lo if lo == hi else f'{lo}-{hi}'}: {a.name} {TYPE_LABEL.get(a.asset_type, a.asset_type)}]")
-        images += urls
-    prompt = (" ".join(labels) + "\n" if labels else "") + \
+    # same late binding as the video render (lookdev.refs.refs_for_episode per asset, remix compliance included)
+    refs = await orch.bind_refs_late(session, shot, cap=cap)
+    images = list(refs.get("images", []))[:cap]
+    labels = orch.role_prefix(refs["assets"]) if refs.get("assets") else ""
+    prompt = (labels + "\n" if labels else "") + \
         f"{shot.shot_prompt}\n电影分镜关键帧，单帧静态画面，人物与参考图保持一致，画幅 {project.aspect_ratio}。"
     return JobCreateRequest(project_id=shot.project_id, shot_id=shot.id, task_type="image.t2i", model_key=stage.model,
                             prompt=prompt, refs=MultimodalRefs(image_urls=images), aspect_ratio=cast(

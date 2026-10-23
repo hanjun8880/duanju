@@ -5,10 +5,11 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src import media
+from src.config import settings
 from src.domains.gateway.routing import model_for, video_stage_for
 from src.domains.gateway.schemas import JobCreateRequest, MultimodalRefs
 from src.domains.lookdev.refs import refs_for_episode
@@ -61,8 +62,10 @@ async def import_storyboard(session: AsyncSession, project_id: uuid.UUID, episod
 REF_ORDER = ("character", "scene", "prop")  # then the pose template's stills
 
 
-async def bind_refs_late(session: AsyncSession, shot: Shot) -> dict[str, Any]:
-    """Resolve refs at render time from the current look-dev assets (so locking after import takes effect)."""
+async def bind_refs_late(session: AsyncSession, shot: Shot, cap: int = MAX_IMAGES) -> dict[str, Any]:
+    """Resolve refs at render time from the current look-dev assets (so locking after import takes effect).
+    Per asset: lookdev.refs.refs_for_episode (episode look > lock > first candidate; nothing while a remix
+    redesign is pending). Shared by video renders and keyframe stills."""
     snap = shot.refs or {}
     names = snap.get("asset_names")
     if names is None:
@@ -76,8 +79,8 @@ async def bind_refs_late(session: AsyncSession, shot: Shot) -> dict[str, Any]:
     images: list[str] = []
     bound: list[dict[str, Any]] = []
     for a in rows:
-        room = MAX_IMAGES - len(images)
-        urls = (await refs_for_episode(session, a, shot.episode_number))[:room]
+        room = cap - len(images)
+        urls = (await refs_for_episode(session, a, shot.episode_number))[:max(room, 0)]
         if not urls:
             continue
         bound.append({"id": str(a.id), "name": a.name, "type": a.asset_type,
@@ -137,7 +140,9 @@ async def shot_request(session: AsyncSession, shot_id: uuid.UUID, tier: str, cha
         res = stage.resolution or "720p"
         return JobCreateRequest(**base, model_key=stage.model, resolution=res,
                                 duration=min(max(shot.duration, 4), 30), return_last_frame=True,
-                                first_frame_url=first)
+                                first_frame_url=first,
+                                # vendor voices differ shot to shot: silent clips + character TTS unless enabled
+                                generate_audio=settings.video_native_audio)
     raise ValueError(f"{tier} is not a cloud render tier")
 
 
@@ -180,7 +185,7 @@ async def next_shot_order(session: AsyncSession, project_id: uuid.UUID, episode:
 
 
 async def render_next(sm: async_sessionmaker[AsyncSession], client: httpx.AsyncClient, shot_id: uuid.UUID, tier: str,
-                      chain: bool, final: bool = False) -> uuid.UUID | None:
+                      chain: bool, final: bool = False, force: bool = False) -> uuid.UUID | None:
     """Episode batch: after one shot finishes, queue the next (chained L2 must wait for the previous last frame)."""
     async with sm() as s:
         shot = await s.get(Shot, shot_id)
@@ -191,11 +196,11 @@ async def render_next(sm: async_sessionmaker[AsyncSession], client: httpx.AsyncC
         if nxt is None:
             return None
         nxt_id = nxt.id
-    return await _queue_shot(sm, client, nxt_id, tier, chain, final)
+    return await _queue_shot(sm, client, nxt_id, tier, chain, final, force)
 
 
 async def _queue_shot(sm: async_sessionmaker[AsyncSession], client: httpx.AsyncClient, shot_id: uuid.UUID, tier: str,
-                      chain: bool, final: bool) -> uuid.UUID | None:
+                      chain: bool, final: bool, force: bool = False) -> uuid.UUID | None:
     from src.domains.gateway import router
     from src.domains.gateway.credit_ledger import LedgerError
     from src.domains.gateway.safety import ContentBlocked, check_prompt
@@ -212,21 +217,24 @@ async def _queue_shot(sm: async_sessionmaker[AsyncSession], client: httpx.AsyncC
         check_prompt(req.prompt, project.content_mode, context={"project_id": str(project.id), "shot_id": str(shot_id)})
     except ContentBlocked as e:  # this shot can't render: skip its continuous run, carry on at the next cut
         log.warning("batch: shot %s blocked: %s", shot_id, e)
-        return await on_render_failed(sm, client, shot_id, tier, chain=chain, final=final, batch=True)
+        return await on_render_failed(sm, client, shot_id, tier, chain=chain, final=final, batch=True, force=force)
     try:
         async with sm() as s:
-            job = await router.create_job(s, user_id=project.user_id, req=req,
+            job = await router.create_job(s, user_id=project.user_id, req=req, force=force,
                                           meta={"render_tier": tier, "chain": chain, "batch": True, "final": final})
-    except LedgerError as e:  # out of credits: stop the batch quietly
+    except LedgerError as e:  # out of credits / over budget: stop the batch quietly
         log.warning("batch stopped at shot %s: %s", shot_id, e)
         return None
-    await router.queue_dispatch(sm, client, job, model.provider)
+    if job.status == "success":  # content-hash cache hit: no vendor, no callback -> advance the batch here
+        await router.run_cached_followups(sm, client, job)
+    else:
+        await router.queue_dispatch(sm, client, job, model.provider)
     return shot_id
 
 
 async def on_render_failed(sm: async_sessionmaker[AsyncSession], client: httpx.AsyncClient,
                            shot_id: uuid.UUID, tier: str, chain: bool, final: bool = False,
-                           batch: bool = False) -> uuid.UUID | None:
+                           batch: bool = False, force: bool = False) -> uuid.UUID | None:
     """Mark a shot failed. In a batch, the continuous shots after it (they need its last frame) fail too, and the
     batch resumes at the next non-continuous shot instead of stopping the whole episode."""
     async with sm() as s, s.begin():
@@ -248,10 +256,17 @@ async def on_render_failed(sm: async_sessionmaker[AsyncSession], client: httpx.A
             break
     if resume is None:
         return None
-    return await _queue_shot(sm, client, resume, tier, chain, final)
+    return await _queue_shot(sm, client, resume, tier, chain, final, force)
 
 
 TIER_RANK = {"L3_post": 4, "L2_master": 3, "L1_draft": 2, "L0_animatic": 1}
+# Jobs that can produce a shot take. The jobs table also holds llm.* rows (no shot), tts rows and keyframe stills
+# (image.t2i on a shot): none of those is a take.
+RENDER_TASK = or_(Job.task_type.like("video.%"), Job.task_type.like("post.%"), Job.task_type == "face.swap")
+
+
+def is_render_task(task_type: str) -> bool:
+    return task_type.startswith(("video.", "post.")) or task_type == "face.swap"
 
 
 def clip_file(s3_key: str) -> Path | None:
@@ -268,7 +283,7 @@ async def best_clips(session: AsyncSession, project_id: uuid.UUID, episode: int)
         select(Job.shot_id, Job.request_payload, Asset.s3_key, Job.id, Shot.selected_job_id)
         .join(Asset, Asset.job_id == Job.id).join(Shot, Shot.id == Job.shot_id)
         .where(Shot.project_id == project_id, Shot.episode_number == episode, Job.status == "success",
-               Asset.kind == "video").order_by(Asset.created_at))).all()
+               Asset.kind == "video", RENDER_TASK).order_by(Asset.created_at))).all()
     best: dict[uuid.UUID, tuple[int, Path]] = {}
     for shot_id, payload, key, job_id, selected in rows:
         f = clip_file(key)
@@ -285,7 +300,7 @@ async def shot_takes(session: AsyncSession, shot_ids: list[uuid.UUID]) -> dict[u
     rows = (await session.execute(
         select(Job.shot_id, Job.id, Job.model_key, Job.request_payload, Asset.s3_key, Asset.created_at)
         .join(Asset, Asset.job_id == Job.id)
-        .where(Job.shot_id.in_(shot_ids), Job.status == "success", Asset.kind == "video")
+        .where(Job.shot_id.in_(shot_ids), Job.status == "success", Asset.kind == "video", RENDER_TASK)
         .order_by(Asset.created_at.desc()))).all()
     out: dict[uuid.UUID, list[dict[str, Any]]] = {}
     for shot_id, job_id, model_key, payload, key, created_at in rows:

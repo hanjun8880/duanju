@@ -52,16 +52,19 @@ def _view(s: Any) -> dict[str, Any]:
 async def preview(body: Preview, session: Session, client: Http) -> dict[str, Any]:
     """Speak one line with an explicit voice, or with a character's saved voice. Cached by (text, voice)."""
     cv: dict[str, Any] | None = body.voice.model_dump() if body.voice else None
-    if cv is None and body.asset_id:
+    project_id = None
+    if body.asset_id:
         a = await session.get(LookdevAsset, body.asset_id)
         if a is None:
             raise HTTPException(404, "character not found")
-        cv = a.voice
+        project_id = a.project_id
+        if cv is None:
+            cv = a.voice
     text = spoken_text(body.text)
     if not text:
         raise HTTPException(422, "nothing to speak")
     try:
-        return _view(await speak(client, text, resolve_voice(cv)))
+        return _view(await speak(client, text, resolve_voice(cv), project_id=project_id))
     except providers.TTSError as e:
         raise HTTPException(502, str(e)) from e
 
@@ -77,6 +80,7 @@ async def voice_shot(shot_id: uuid.UUID, session: Session, client: Http) -> dict
         raise HTTPException(422, "shot has no dialogue")
     speaker = await session.get(LookdevAsset, shot.speaker_asset_id) if shot.speaker_asset_id else None
     try:
-        return _view(await speak(client, text, resolve_voice(speaker.voice if speaker else None)))
+        return _view(await speak(client, text, resolve_voice(speaker.voice if speaker else None),
+                                 project_id=shot.project_id, shot_id=shot.id))
     except providers.TTSError as e:
         raise HTTPException(502, str(e)) from e

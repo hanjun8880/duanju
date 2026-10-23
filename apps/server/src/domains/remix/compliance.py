@@ -22,10 +22,11 @@ def require_redesign(a: LookdevAsset) -> None:
 
 
 def bindable_refs(a: LookdevAsset) -> list[str]:
-    """What a shot may bind for this asset: nothing while a redesign is pending."""
+    """What a shot may bind for this asset (any episode without a per-episode look): nothing while a redesign
+    is pending, else the same rule as lookdev.refs.refs_for_episode (locked ≤3, else the first candidate)."""
     if (a.meta or {}).get("redesign_required"):
         return []
-    return list(a.locked_ref_urls or [])[:MAX_BOUND] or list(a.ref_urls or [])[:MAX_BOUND]
+    return list(a.locked_ref_urls or [])[:MAX_BOUND] or list(a.ref_urls or [])[:1]
 
 
 def mark_redesigned(a: LookdevAsset) -> None:

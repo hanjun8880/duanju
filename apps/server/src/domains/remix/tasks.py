@@ -19,7 +19,7 @@ from typing import Any
 from src.config import settings
 from src.domains.gateway.routing import model_for
 from src.domains.remix import dedupe
-from src.domains.script import series
+from src.domains.script import series, usage
 from src.domains.script.script_engine import CachedDirectorLLM, KeyframeNotes
 from src.queue import celery_app
 
@@ -84,7 +84,7 @@ def episode_shots(entry: dict[str, Any]) -> list[dict[str, Any]]:
     return cache().get(entry["sha256"]) or []
 
 
-async def describe_episode(project_id: str, ep: int) -> dict[str, Any]:
+async def describe_episode(project_id: str, ep: int, sm: Any = None) -> dict[str, Any]:
     """One vision pass over the deduped keyframes, cached per (sha256, model); skipped shots reuse notes."""
     entry = read_manifest(project_id)["episodes"][str(ep)]
     model = model_for("remix_vision").model
@@ -96,20 +96,23 @@ async def describe_episode(project_id: str, ep: int) -> dict[str, Any]:
         llm, notes = make_llm(model), dict[int, str]()
         for i in range(0, len(kept), dedupe.BATCH):
             batch = kept[i:i + dedupe.BATCH]
-            res = await llm.structured(KeyframeNotes, series.KEYFRAME_RULES, {}, series.keyframe_content(batch),
-                                       effort="low", max_tokens=16000, model=model)
+            try:
+                res = await llm.structured(KeyframeNotes, series.KEYFRAME_RULES, {}, series.keyframe_content(batch),
+                                           effort="low", max_tokens=16000, model=model, stage="remix_vision")
+            finally:  # every vision call is ledgered as llm.remix_vision, even one that fails
+                await usage.record_llm_calls(project_id, llm.calls, sm)
             notes |= {n.shot_order: n.description for n in res.shots}
             update_episode(project_id, ep, progress=round(0.6 + 0.4 * (i + len(batch)) / len(kept), 2))
         c.put_notes(entry["sha256"], model, notes)
     return update_episode(project_id, ep, status="described", progress=1.0, vision_model=model)
 
 
-async def run_episode(project_id: str, ep: int, describe: bool) -> str:
+async def run_episode(project_id: str, ep: int, describe: bool, sm: Any = None) -> str:
     try:
         if read_manifest(project_id)["episodes"][str(ep)].get("kept_orders") is None:
             await deconstruct_episode(project_id, ep)
         if describe:
-            await describe_episode(project_id, ep)
+            await describe_episode(project_id, ep, sm)
         else:
             sha = read_manifest(project_id)["episodes"][str(ep)]["sha256"]
             done = cache().get_notes(sha, model_for("remix_vision").model) is not None
@@ -128,4 +131,5 @@ def episode_notes(entry: dict[str, Any]) -> dict[int, str]:
 
 @celery_app.task(name="remix.episode")
 def episode_task(project_id: str, ep: int, describe: bool) -> str:
-    return asyncio.run(run_episode(project_id, ep, describe))
+    from src.queue import _run  # per-task engine: asyncpg pools are loop-bound
+    return str(_run(lambda sm: run_episode(project_id, ep, describe, sm)))

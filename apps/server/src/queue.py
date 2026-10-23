@@ -136,7 +136,8 @@ def assemble(job_id: str) -> str:
                     clips = [str(best[i]) for i in order if i in best]
                     meta["shots_total"], meta["shots_used"] = len(order), len(clips)
                     async with httpx.AsyncClient() as client:  # dialogue track: character TTS (cached)
-                        mix["lines"], notes = await voice.dialogue_lines(s, client, shots, best, mix["audio_mode"])
+                        mix["lines"], notes = await voice.dialogue_lines(s, client, shots, best, mix["audio_mode"],
+                                                                         sm=sm)
                     meta["dialogue_lines"] = sum(1 for x in mix["lines"] if x is not None)
                     if notes:
                         meta["tts_notes"] = notes

@@ -54,7 +54,7 @@ async def select_take(shot_id: uuid.UUID, body: SelectTake, session: Session) ->
         raise HTTPException(404, "shot not found")
     if body.job_id is not None:
         job = await session.get(Job, body.job_id)
-        if job is None or job.shot_id != shot_id or job.status != "success":
+        if job is None or job.shot_id != shot_id or job.status != "success" or not orch.is_render_task(job.task_type):
             raise HTTPException(422, "job is not a finished take of this shot")
     s.selected_job_id = body.job_id
     await session.commit()
@@ -90,6 +90,7 @@ class RenderRequest(BaseModel):
     tier: Literal["L0_animatic", "L1_draft", "L2_master", "L3_post"]
     chain: bool = True
     final: bool = Field(default=False, description="L2 only: 1080p final render instead of the 720p per-kind model")
+    force: bool = Field(default=False, description="re-roll: skip the content-hash cache (a batch keeps skipping it)")
 
 
 @api.post("/shots/{shot_id}/render", status_code=201)
@@ -101,7 +102,7 @@ async def render_shot(shot_id: uuid.UUID, body: RenderRequest, session: Session,
     if body.tier in ("L0_animatic", "L3_post"):
         response.status_code = 202
         return await _local_render(session, shot, body.tier)
-    return await _cloud_render(session, shot_id, body.tier, body.chain, bg, http, final=body.final)
+    return await _cloud_render(session, shot_id, body.tier, body.chain, bg, http, final=body.final, force=body.force)
 
 
 async def _local_render(session: AsyncSession, shot: Shot, tier: str) -> dict[str, Any]:
@@ -119,12 +120,12 @@ async def _local_render(session: AsyncSession, shot: Shot, tier: str) -> dict[st
 
 
 async def _cloud_render(session: AsyncSession, shot_id: uuid.UUID, tier: str, chain: bool, bg: BackgroundTasks,
-                        http: Http, batch: bool = False, final: bool = False) -> dict[str, Any]:
+                        http: Http, batch: bool = False, final: bool = False, force: bool = False) -> dict[str, Any]:
     try:
         req = await orch.shot_request(session, shot_id, tier, chain=chain, final=final)
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
-    job = await submit(req, session, bg, http,
+    job = await submit(req, session, bg, http, force=force,
                        meta={"render_tier": tier, "chain": chain, "batch": batch, "final": final})
     return job_view(job)
 
@@ -142,11 +143,12 @@ async def render_episode(project_id: uuid.UUID, n: int, body: RenderRequest, ses
         raise HTTPException(422, "L3 runs per shot on a finished master")
     if body.tier == "L2_master" and body.chain:
         return {"jobs": [await _cloud_render(session, shots[0].id, body.tier, True, bg, http, batch=True,
-                                             final=body.final)], "mode": "sequential"}
+                                             final=body.final, force=body.force)], "mode": "sequential"}
     jobs = []
     for s in shots:
         jobs.append(await _local_render(session, s, body.tier) if body.tier == "L0_animatic"
-                    else await _cloud_render(session, s.id, body.tier, body.chain, bg, http, final=body.final))
+                    else await _cloud_render(session, s.id, body.tier, body.chain, bg, http, final=body.final,
+                                             force=body.force))
     return {"jobs": jobs, "mode": "parallel"}
 
 
