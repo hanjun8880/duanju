@@ -117,3 +117,25 @@
 - 网页正文抓取是启发式（按块级标签长度过滤导航/按钮文案），非完整 readability 算法；复杂排版页面可能需要手动贴正文兜底。
 - 「按原文整理成剧本」需要 ANTHROPIC_API_KEY；未配置时明确报错，不是静默失败。
 - 原片拆解用的 faster-whisper 模型较大时，在资源受限环境可能被系统杀进程；生产环境需要给 worker 预留足够内存。
+
+## Team voice — 配音 / 成片 / 安全（分支 team/voice）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 安全：成年语境白名单（少年将军/少年英雄/少女时代/少女感等），中文数字年龄（十五岁/七岁），minor character/minor injury 不误伤 | PASS | `test_safety_context.py` |
+| 安全：未成年指示词（含白名单短语中的少年/少女）+ 性内容，两种模式下一律拦截；白名单短语仅在写明成年年龄时放行 | PASS | 同上，参数化两种 content_mode |
+| docker-compose：所有端口绑 127.0.0.1；新增 api/worker/web（profile `prod`，默认不启动；api 无 APP_TOKEN 拒绝启动） | PASS | `docker compose config` 校验；未构建/未启动镜像 |
+| 鉴权：APP_TOKEN Bearer 中间件（/healthz、/api/v1/auth/login 例外）；/media 接受 Bearer、路径绑定签名短期 URL（`auth.sign_media_url`）或登录下发的 12h HttpOnly cookie | PASS | `test_auth.py` |
+| 前端：AuthGate 登录页 + api.ts 统一加 Authorization；401 自动回登录页 | PASS | `pnpm tsc`、`pnpm test:run`（新增 `auth.test.ts`）；未做真机浏览器验证 → NOT_TESTED |
+| 配音：火山 V1 / MiniMax t2a_v2 适配器（字段 UNVERIFIED，集中在 `voice/providers.py` CONFIG，可 env 覆盖） | PASS（传输层打桩）/ 真实调用 BLOCKED（无密钥） | `test_voice.py` |
+| 配音：本地 espeak-ng（缺失时按字数生成静音） | VERIFIED | VPS 上真跑 espeak-ng |
+| 配音：选择顺序 角色 voice.provider → model_for("tts").provider；无密钥自动退本地并在结果里标 fallback_from；按 (text, voice) sha256 缓存 | PASS | `test_voice.py` |
+| 成片：对白轨 tts/native/mix，台词对齐镜头起点(+0.1s)；竖屏 ASS 字幕（按宽度定字号、CJK 手动换行、防样式注入）；BGM 循环 + sidechain ducking | PASS | `test_post_dialogue.py`（真 FFmpeg，分频段测电平） |
+| 成片：post.assemble 每镜按说话人音色 TTS → 对白轨；动画样片自带字幕不重复烧；config `VIDEO_NATIVE_AUDIO=false`（默认 tts） | PASS | `test_assemble_dialogue.py` |
+
+后端 174 passed；ruff、mypy 通过；前端 tsc + vitest 8 passed。
+
+### 已知限制
+- 渲染请求仍按 Seedance 默认 generate_audio=True（shot_orchestrator 属 render 组）；需要 render 组改为 `generate_audio=settings.video_native_audio`。
+- TTS 不走积分账本（无 job）；靠缓存控制消耗。需要计费时由 ledger 组接。
+- 每镜仅一个说话人（沿用 shots.speaker_asset_id）；镜内多人对白需要拆镜。
