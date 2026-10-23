@@ -76,6 +76,31 @@ class SeriesPlan(BaseModel):
     episodes: list[EpisodeOutline]
 
 
+class SegmentDigest(BaseModel):
+    segment: int = Field(description="【片段 i】的编号 i")
+    summary: str = Field(description="200 字内剧情摘要：关键情节、转折、伏笔")
+    characters: list[str] = Field(description="出场人物（统一用全名）")
+    scenes: list[str]
+    props: list[str]
+
+
+class DigestBatch(BaseModel):
+    digests: list[SegmentDigest]
+
+
+class SeriesSetting(BaseModel):
+    title: str
+    logline: str
+    episode_count: int = Field(description="建议总集数")
+    characters: list[BibleCharacter]
+    props: list[BibleItem]
+    scenes: list[BibleItem]
+
+
+class EpisodeOutlines(BaseModel):
+    episodes: list[EpisodeOutline]
+
+
 class EpisodeScript(BaseModel):
     episode_title: str
     script_text: str = Field(description="分场剧本：场号、日/夜、内/外、地点；动作描写；角色名：台词")
