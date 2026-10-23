@@ -8,10 +8,18 @@ import { useWorkbench } from "@/lib/store";
 const TIERS: { id: Tier; label: string; note: string }[] = [
   { id: "L0_animatic", label: "故事板", note: "本地" },
   { id: "L1_draft", label: "草稿", note: "480p" },
-  { id: "L2_master", label: "母带", note: "1080p" },
+  { id: "L2_master", label: "母带", note: "720p，按镜头类型选模型" },
   { id: "L3_post", label: "4K", note: "本地" },
 ];
 const TYPE = { character: "人物", prop: "道具", scene: "场景" } as const;
+const KIND = { dialogue: "对白", action: "动作", establishing: "空镜", insert: "插入" } as const;
+type ShotKind = keyof typeof KIND;
+type Take = { job_id: string; render_tier: string | null; model_key: string; final: boolean; url: string; created_at: string };
+// Fields the render team added to the shot list; contracts.ts is regenerated after the merge.
+type ShotX = Shot & {
+  shot_kind?: ShotKind; continuous_from_prev?: boolean; keyframe_url?: string | null;
+  keyframe_status?: string; selected_job_id?: string | null; takes?: Take[];
+};
 
 export function StoryboardCanvas({ project, onSpent }: { project: Project; onSpent: () => void }) {
   const shots = useApi<Shot[]>(`/projects/${project.id}/shots`, 5000);
@@ -57,6 +65,14 @@ export function StoryboardCanvas({ project, onSpent }: { project: Project; onSpe
       } catch (e) { setMsg({ ok: false, text: (e as Error).message }); }
     });
   };
+  const patch = async (s: Shot, json: Record<string, unknown>) => {
+    try { await api(`/shots/${s.id}`, { method: "PATCH", json }); shots.reload(); }
+    catch (e) { setMsg({ ok: false, text: `第 ${s.shot_order} 镜未保存：${(e as Error).message}` }); }
+  };
+  const select = async (s: Shot, job_id: string | null) => {
+    try { await api(`/shots/${s.id}/select`, { method: "POST", json: { job_id } }); shots.reload(); }
+    catch (e) { setMsg({ ok: false, text: `第 ${s.shot_order} 镜选片失败：${(e as Error).message}` }); }
+  };
   const savePrompt = async (s: Shot, shot_prompt: string) => {
     if (shot_prompt === s.shot_prompt || !shot_prompt.trim()) return;
     try { await api(`/shots/${s.id}`, { method: "PATCH", json: { shot_prompt } }); }
@@ -82,7 +98,7 @@ export function StoryboardCanvas({ project, onSpent }: { project: Project; onSpe
         </dl>
         <label className="flex items-center gap-2">
           <input type="checkbox" checked={chain} onChange={(e) => setChain(e.target.checked)} />
-          尾帧接力：上一镜的末帧作为下一镜的首帧
+          尾帧接力：只对标为「接上一镜」的镜头生效，其余镜头用参考图出片
         </label>
       </div>
       {list.length > 0 && (
@@ -103,8 +119,9 @@ export function StoryboardCanvas({ project, onSpent }: { project: Project; onSpe
           <div className="flex items-stretch">
             {list.map((s, i) => (
               <Fragment key={s.id}>
-                {i > 0 && <Thread on={chain} passed={!!list[i - 1].last_frame_url} />}
-                <ShotPanel shot={s} cost={cost} onRender={render} onPrompt={savePrompt} busy={pending.has(s.id) || allBusy} />
+                {i > 0 && <Thread on={chain && !!(s as ShotX).continuous_from_prev} passed={!!list[i - 1].last_frame_url} />}
+                <ShotPanel shot={s as ShotX} first={i === 0} cost={cost} onRender={render} onPrompt={savePrompt}
+                  onPatch={patch} onSelect={select} busy={pending.has(s.id) || allBusy} />
               </Fragment>
             ))}
           </div>
@@ -118,15 +135,19 @@ function Thread({ on, passed }: { on: boolean; passed: boolean }) {
   return (
     <div className="flex w-14 shrink-0 flex-col items-center justify-center" aria-hidden>
       <div className={`h-px w-full ${on ? (passed ? "bg-dawn" : "border-t border-dashed border-dawn") : "bg-celadon-deep/50"}`} />
-      {on && <span className="mt-1 text-xs text-dawn">{passed ? "已接" : "接力"}</span>}
+      {on ? <span className="mt-1 text-xs text-dawn">{passed ? "已接" : "接力"}</span>
+        : <span className="mt-1 text-xs text-ink-soft">切</span>}
     </div>
   );
 }
 
-function ShotPanel({ shot, cost, onRender, onPrompt, busy }: {
-  shot: Shot; cost: (t: Tier, s: Shot) => number; onRender: (s: Shot, t: Tier) => void; onPrompt: (s: Shot, p: string) => void; busy: boolean;
+function ShotPanel({ shot, first, cost, onRender, onPrompt, onPatch, onSelect, busy }: {
+  shot: ShotX; first: boolean; cost: (t: Tier, s: Shot) => number; onRender: (s: Shot, t: Tier) => void;
+  onPrompt: (s: Shot, p: string) => void; onPatch: (s: Shot, j: Record<string, unknown>) => void;
+  onSelect: (s: Shot, jobId: string | null) => void; busy: boolean;
 }) {
-  const cover = shot.last_frame_url ?? shot.first_frame_url ?? shot.refs.images?.[0];
+  const cover = shot.last_frame_url ?? (shot.keyframe_status === "approved" ? shot.keyframe_url : null) ?? shot.refs.images?.[0];
+  const takes = shot.takes ?? [];
   const done = TIERS.findIndex((t) => shot.status === `rendered_${t.id}`);
   return (
     <article role="listitem" className="flex w-[300px] shrink-0 flex-col" aria-label={`第 ${shot.shot_order} 镜`}>
@@ -143,6 +164,24 @@ function ShotPanel({ shot, cost, onRender, onPrompt, busy }: {
           <p className="mt-1 text-xs leading-5 text-ink-soft">{shot.refs.assets.map((a) => `图${a.range[0]}${a.range[1] > a.range[0] ? `至${a.range[1]}` : ""} ${a.name}（${TYPE[a.type]}）`).join("，")}</p>
         )}
       </div>
+      <div className="mt-2 flex flex-wrap items-center gap-3 text-xs">
+        <label className="flex items-center gap-1 text-ink-soft">类型
+          <select className="field w-auto py-0.5 text-xs text-ink" value={shot.shot_kind ?? "dialogue"}
+            onChange={(e) => onPatch(shot, { shot_kind: e.target.value })} aria-label="镜头类型">
+            {(Object.keys(KIND) as ShotKind[]).map((k) => <option key={k} value={k}>{KIND[k]}</option>)}
+          </select>
+        </label>
+        {!first && (
+          <label className="flex items-center gap-1">
+            <input type="checkbox" checked={!!shot.continuous_from_prev}
+              onChange={(e) => onPatch(shot, { continuous_from_prev: e.target.checked })} />
+            接上一镜
+          </label>
+        )}
+        <span className="text-ink-soft" title="关键帧审批通过后作为首帧">
+          关键帧：{({ none: "无", pending: "生成中", ready: "待审", approved: "已批", rejected: "已退" } as Record<string, string>)[shot.keyframe_status ?? "none"] ?? shot.keyframe_status}
+        </span>
+      </div>
       <label className="mt-2 block text-xs text-ink-soft">五段式镜头描述
         <textarea defaultValue={shot.shot_prompt} onBlur={(e) => onPrompt(shot, e.target.value)} className="field mt-1 h-24 text-sm leading-6 text-ink" />
       </label>
@@ -157,6 +196,23 @@ function ShotPanel({ shot, cost, onRender, onPrompt, busy }: {
           </li>
         ))}
       </ol>
+      {takes.length > 0 && (
+        <ul className="mt-3 space-y-1 text-xs" aria-label="已出片的版本">
+          {takes.map((t) => {
+            const chosen = shot.selected_job_id === t.job_id;
+            return (
+              <li key={t.job_id} className="flex items-center justify-between gap-2">
+                <a href={t.url} target="_blank" rel="noreferrer" className="underline">
+                  {TIERS.find((x) => x.id === t.render_tier)?.label ?? t.render_tier}{t.final ? "（终版）" : ""} · {t.model_key}
+                </a>
+                <button className="btn btn-quiet px-2 py-0.5 text-xs" onClick={() => onSelect(shot, chosen ? null : t.job_id)}>
+                  {chosen ? "已选用（取消）" : "选用"}
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </article>
   );
 }
