@@ -178,7 +178,12 @@ def remix(project_id: str, video_path: str) -> int:
     from src.models import Project
 
     out_dir = Path(settings.storage_dir) / "remix" / project_id
-    shots = LocalVideoDeconstructor(whisper_size=settings.whisper_size).deconstruct_for_remix(video_path, str(out_dir))
+    try:
+        shots = LocalVideoDeconstructor(whisper_size=settings.whisper_size).deconstruct_for_remix(video_path,
+                                                                                                 str(out_dir))
+    except Exception:
+        _run(lambda sm: _mark(sm, project_id, "remix_failed"))  # the UI stops waiting and shows the failure
+        raise
 
     async def save(sm: SM) -> int:
         async with sm() as s:
@@ -198,4 +203,16 @@ def remix(project_id: str, video_path: str) -> int:
             assert p is not None
             p.source_novel_text, p.status = series.remix_source_text(shots, notes), "source_ready"
         return len(shots)
-    return int(_run(save))
+    try:
+        return int(_run(save))
+    except Exception:
+        _run(lambda sm: _mark(sm, project_id, "remix_failed"))
+        raise
+
+
+async def _mark(sm: SM, project_id: str, status: str) -> None:
+    from src.models import Project
+    async with sm() as s, s.begin():
+        p = await s.get(Project, uuid.UUID(project_id), with_for_update=True)
+        if p is not None:
+            p.status = status

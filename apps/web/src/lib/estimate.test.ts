@@ -12,7 +12,7 @@ describe("credit burn estimator matches the backend ledger formula", () => {
     expect(estimateCredits({ ...seedance, resolution_multipliers: {} }, 5, "1080p")).toBe(5);
   });
   it("tier plan mirrors shot_orchestrator", () => {
-    expect(tierPlan("L1_draft", 20)).toEqual({ model_key: "minimax_h3", resolution: "480p", seconds: 5 });
+    expect(tierPlan("L1_draft", 20)).toEqual({ model_key: "seedance_2_5_draft", resolution: "480p", seconds: 20 });
     expect(tierPlan("L2_master", 20)).toEqual({ model_key: "seedance_2_5_spicy", resolution: "1080p", seconds: 20 });
     expect(tierPlan("L0_animatic", 20)).toEqual({ model_key: "local_animatic", resolution: "720p", seconds: 20 });
   });

@@ -7,12 +7,18 @@ import { ProjectImporter } from "@/features/project-importer/ProjectImporter";
 import { LookdevStudio } from "@/features/lookdev-studio/LookdevStudio";
 import { StoryboardCanvas } from "@/features/storyboard-canvas/StoryboardCanvas";
 import { AdminLedger } from "@/features/admin-ledger/AdminLedger";
+import { ScriptRoom } from "@/features/script-room/ScriptRoom";
+import { FinalCut } from "@/features/final-cut/FinalCut";
 
+// The five steps of making a series, in order.
 const TABS: { id: Tab; label: string }[] = [
-  { id: "import", label: "剧本与导入" },
+  { id: "source", label: "素材" },
+  { id: "script", label: "剧本" },
   { id: "lookdev", label: "定妆" },
-  { id: "storyboard", label: "分镜长卷" },
+  { id: "storyboard", label: "分镜" },
+  { id: "final", label: "成片" },
 ];
+const NUM = ["一", "二", "三", "四", "五"];
 
 export default function Workbench() {
   const { projectId, setProject, tab, setTab, ledgerOpen, setLedgerOpen } = useWorkbench();
@@ -44,11 +50,11 @@ export default function Workbench() {
             <button className="btn btn-quiet" onClick={() => setLedgerOpen(true)}>账本与模型</button>
           </div>
         </div>
-        <nav className="mx-auto flex max-w-[1400px] gap-6 px-4 sm:px-8" aria-label="工作区">
-          {TABS.map((t) => (
+        <nav className="mx-auto flex max-w-[1400px] gap-6 overflow-x-auto px-4 sm:px-8" aria-label="制作流程">
+          {TABS.map((t, i) => (
             <button key={t.id} onClick={() => setTab(t.id)} aria-current={tab === t.id ? "page" : undefined}
-              className={`-mb-px border-b-2 pb-2 text-base ${tab === t.id ? "border-ink font-semibold text-ink" : "border-transparent text-ink-soft hover:text-ink"}`}>
-              {t.label}
+              className={`-mb-px flex items-baseline gap-1.5 border-b-2 pb-2 text-base ${tab === t.id ? "border-ink font-semibold text-ink" : "border-transparent text-ink-soft hover:text-ink"}`}>
+              <span className={`text-xs ${tab === t.id ? "text-seal" : ""}`} aria-hidden>{NUM[i]}</span>{t.label}
             </button>
           ))}
         </nav>
@@ -56,9 +62,11 @@ export default function Workbench() {
 
       <main className="mx-auto max-w-[1400px] px-4 py-6 sm:px-8">
         {projects.error && <p className="mb-4 text-seal">后端未连接：{projects.error}。请先启动 apps/server（uvicorn src.main:app）。</p>}
-        {tab === "import" && <ProjectImporter projects={projects.data ?? []} onChanged={() => { projects.reload(); me.reload(); }} />}
-        {tab === "lookdev" && (current ? <LookdevStudio project={current} /> : <NeedProject />)}
+        {tab === "source" && <ProjectImporter projects={projects.data ?? []} onChanged={() => { projects.reload(); me.reload(); }} />}
+        {tab === "script" && (current ? <ScriptRoom project={current} onChanged={projects.reload} /> : <NeedProject />)}
+        {tab === "lookdev" && (current ? <LookdevStudio project={current} onSpent={me.reload} /> : <NeedProject />)}
         {tab === "storyboard" && (current ? <StoryboardCanvas project={current} onSpent={me.reload} /> : <NeedProject />)}
+        {tab === "final" && (current ? <FinalCut project={current} /> : <NeedProject />)}
       </main>
 
       {ledgerOpen && <AdminLedger onClose={() => { setLedgerOpen(false); me.reload(); }} />}
@@ -67,5 +75,5 @@ export default function Workbench() {
 }
 
 function NeedProject() {
-  return <p className="text-ink-soft">先在「剧本与导入」里新建一个剧集项目。</p>;
+  return <p className="text-ink-soft">先在「素材」里新建一个剧集项目。</p>;
 }

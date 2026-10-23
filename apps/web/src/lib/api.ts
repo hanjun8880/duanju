@@ -20,7 +20,8 @@ export async function api<T>(path: string, init?: RequestInit & { json?: unknown
   return data as T;
 }
 
-export function useApi<T>(path: string | null) {
+/** refreshMs: re-fetch on an interval (results of queued renders arrive asynchronously). */
+export function useApi<T>(path: string | null, refreshMs?: number) {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
   const reload = useCallback(() => {
@@ -28,5 +29,10 @@ export function useApi<T>(path: string | null) {
     api<T>(path).then((d) => { setData(d); setError(null); }, (e: Error) => setError(e.message));
   }, [path]);
   useEffect(reload, [reload]);
+  useEffect(() => {
+    if (!refreshMs) return;
+    const t = setInterval(reload, refreshMs);
+    return () => clearInterval(t);
+  }, [reload, refreshMs]);
   return { data, error, reload };
 }

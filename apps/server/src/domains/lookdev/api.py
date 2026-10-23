@@ -60,7 +60,8 @@ async def patch_asset(asset_id: uuid.UUID, body: LookdevPatch, session: Session)
     if a is None:
         raise HTTPException(404, "look-dev asset not found")
     consent = body.likeness_consent if body.likeness_consent is not None else a.meta.get("likeness_consent", False)
-    if a.asset_type == "character" and body.ref_urls and not consent:
+    added = set(body.ref_urls or []) - set(a.ref_urls)  # reordering / removing needs no new declaration
+    if a.asset_type == "character" and added and not consent:
         raise HTTPException(422, "character reference images require likeness_consent "
                                  "(fictional synthetic character or full likeness authorization)")
     if body.visual_prompt is not None:

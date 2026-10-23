@@ -80,3 +80,21 @@ async def test_admin_model_switch_price_and_manual_refund(sessionmaker, user_and
         r = await c.patch("/api/v1/admin/models/minimax_h3", json={"credits_per_unit": "0.3"})
         ledger_rows = (await c.get("/api/v1/ledger", params={"user_id": str(uid)})).json()
     assert [x["reason"] for x in ledger_rows][:2] == ["cancel_refund", "pre_deduct"]
+
+
+async def test_lookdev_patch_consent_only_for_newly_added_character_refs(engine, user_and_project):
+    from sqlalchemy import text
+    _, pid = user_and_project
+    async with engine.begin() as conn:
+        aid = (await conn.execute(text(
+            "INSERT INTO lookdev_assets (project_id, asset_type, name, visual_prompt, ref_urls) VALUES "
+            "(:p, 'character', '林', 'v', '[\"/media/renders/a.png\", \"/media/renders/b.png\"]') RETURNING id"),
+            {"p": pid})).scalar_one()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.patch(f"/api/v1/lookdev/{aid}", json={"ref_urls": ["/media/renders/b.png"]})  # generated, reorder
+        assert r.status_code == 200 and r.json()["ref_urls"] == ["/media/renders/b.png"]
+        r = await c.patch(f"/api/v1/lookdev/{aid}", json={"ref_urls": ["/media/renders/b.png", "/media/uploads/me.jpg"]})
+        assert r.status_code == 422 and "likeness_consent" in r.text
+        r = await c.patch(f"/api/v1/lookdev/{aid}", json={"ref_urls": ["/media/uploads/me.jpg"], "likeness_consent": True,
+                                                          "visual_prompt": "短发"})
+        assert r.status_code == 200 and r.json()["visual_prompt"] == "短发" and r.json()["meta"]["likeness_consent"]

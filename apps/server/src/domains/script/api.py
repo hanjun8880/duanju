@@ -74,7 +74,7 @@ async def get_project(project_id: uuid.UUID, session: Session) -> dict[str, Any]
     p = await session.get(Project, project_id)
     if p is None:
         raise HTTPException(404, "project not found")
-    return project_view(p)
+    return {**project_view(p), "source_novel_text": p.source_novel_text}
 
 
 class StoryboardImport(BaseModel):
@@ -164,12 +164,15 @@ class RemixRequest(BaseModel):
 
 @api.post("/projects/{project_id}/remix", status_code=202)
 async def remix(project_id: uuid.UUID, body: RemixRequest, session: Session) -> dict[str, str]:
-    if await session.get(Project, project_id) is None:
+    p = await session.get(Project, project_id)
+    if p is None:
         raise HTTPException(404, "project not found")
     root = Path(settings.storage_dir).resolve()
     src = Path(body.video_path).resolve()
     if root not in src.parents or not src.is_file():  # only files we stored ourselves
         raise HTTPException(422, "video_path must be a file returned by /uploads")
+    p.status = "remixing"
+    await session.commit()
     orch.enqueue_local("remix.deconstruct", str(project_id), str(src))
     return {"queue": "local_post", "status": "queued"}
 

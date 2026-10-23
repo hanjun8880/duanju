@@ -71,3 +71,28 @@
 - 二创关键帧批量送 VLM 反推分镜。
 - 用户鉴权（目前单一默认导演账号 `director`）。
 - S3/MinIO 预签名上传与素材转存（目前本地 `storage/` + `/media` 静态目录）。
+
+## Phase 4 — 一条龙自用流程：素材 → 剧本 → 定妆 → 分镜 → 出片 → 整部（已完成）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 素材导入：小说原文（txt，UTF-8/GB18030）、一句想法、原片二创 | VERIFIED（前端）/ PASS（API） | 浏览器截图；`test_series.py` |
+| 原片二创：本地切镜 + whisper 转写 + 关键帧批量送 Claude 识别 → 素材文本 | PASS | 真实 FFmpeg/whisper，视觉调用为 SSE 桩；`test_production.py` |
+| 剧集规划：小说分段（章节正则 / 3000 字），≤300k 字 → 剧集圣经 + 定妆卡 + 分集大纲 | PASS | Claude 流式结构化输出，SSE 桩；`test_series.py` |
+| 分集剧本、分集分镜（已开拍的镜头 409 保护） | PASS | `test_series.py` |
+| 定妆：自动建卡、出参考图（seedream_5_pro）、上传、设首图、移除；只对新增人物图要求肖像授权 | PASS / VERIFIED（前端） | `test_workbench_api.py`；截图 |
+| 火山方舟 Ark 适配器：Seedance 2.5（含 draft 480p）、Seedream 图像；任务轮询、超时退款并降级、24h 过期前下载到本地 | PASS（官方文档字段，仅替换 HTTP 传输层） | `test_ark.py` |
+| 整集出片：L0 本地故事板、L1 草稿并行、L2 母带尾帧接力顺序 | VERIFIED（L0）/ PASS（L1/L2） | 真实 API + local_post worker，3 镜头均出预览 |
+| 合成单集（统一尺寸/帧率/音轨后 concat）+ OTIO；导出整部 | VERIFIED | EP01 1080x1920、14.0s、带音轨，抽帧可见字幕；整部导出成功 |
+| 前端五步工作台（素材 / 剧本 / 定妆 / 分镜 / 成片） | VERIFIED | Playwright 1440 + 390 截图，无 console 错误、无横向溢出 |
+| 真实 Claude 调用 | BLOCKED | 无 ANTHROPIC_API_KEY |
+| 真实 Ark 调用 | BLOCKED | 无 ARK_API_KEY；Seedance 2.5 需账户余额 ≥ ¥200 开通 |
+| 4K 超分、换脸、测试浏览器 H.264 播放 | NOT_TESTED | 无二进制；测试用 Chromium 不含 H.264 解码 |
+
+后端合计 103 passed；`ruff`、`mypy`、`pnpm tsc`、`pnpm test:run`（6）、`pnpm build` 通过。
+
+### 已知限制（shortcut）
+- 小说上限 300k 字，超出需分卷导入。
+- `DISPATCH_MODE=celery` 下服务重启不自动恢复轮询（inline 模式会恢复）。
+- 素材存本地 `STORAGE_DIR`，未接 S3/MinIO。
+- 价格为占位值，需按方舟账单校准 `model_catalog`。

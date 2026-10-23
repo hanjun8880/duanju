@@ -4,6 +4,8 @@ import type { NextConfig } from "next";
 const backend = process.env.BACKEND_URL ?? "http://localhost:8000";
 
 const nextConfig: NextConfig = {
+  // planning a whole novel is one long LLM call; the default proxy timeout would cut it off
+  experimental: { proxyTimeout: 15 * 60 * 1000 },
   async rewrites() {
     return [
       { source: "/api/v1/:path*", destination: `${backend}/api/v1/:path*` },

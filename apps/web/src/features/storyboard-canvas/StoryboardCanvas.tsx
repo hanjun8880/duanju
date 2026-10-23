@@ -1,7 +1,7 @@
 "use client";
 import { Fragment, useMemo, useState } from "react";
 import { api, useApi } from "@/lib/api";
-import type { Job, Model, Project, Shot, Tier } from "@/lib/contracts";
+import type { Episode, Job, Model, Project, Shot, Tier } from "@/lib/contracts";
 import { estimateCredits, tierPlan } from "@/lib/estimate";
 import { useWorkbench } from "@/lib/store";
 
@@ -14,12 +14,14 @@ const TIERS: { id: Tier; label: string; note: string }[] = [
 const TYPE = { character: "人物", prop: "道具", scene: "场景" } as const;
 
 export function StoryboardCanvas({ project, onSpent }: { project: Project; onSpent: () => void }) {
-  const shots = useApi<Shot[]>(`/projects/${project.id}/shots`);
+  const shots = useApi<Shot[]>(`/projects/${project.id}/shots`, 5000);
+  const outlines = useApi<Episode[]>(`/projects/${project.id}/episodes`);
   const models = useApi<Model[]>("/models");
-  const { chain, setChain } = useWorkbench();
-  const [episode, setEpisode] = useState(1);
+  const { chain, setChain, episode, setEpisode } = useWorkbench();
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
-  const episodes = useMemo(() => [...new Set((shots.data ?? []).map((s) => s.episode_number))].sort((a, b) => a - b), [shots.data]);
+  const episodes = useMemo(() => [...new Set([...(shots.data ?? []).map((s) => s.episode_number),
+    ...(outlines.data ?? []).map((e) => e.episode_number)])].sort((a, b) => a - b), [shots.data, outlines.data]);
+  const title = outlines.data?.find((e) => e.episode_number === episode)?.title;
   const list = (shots.data ?? []).filter((s) => s.episode_number === episode);
   const byKey = useMemo(() => Object.fromEntries((models.data ?? []).map((m) => [m.model_key, m])), [models.data]);
 
@@ -38,6 +40,16 @@ export function StoryboardCanvas({ project, onSpent }: { project: Project; onSpe
       onSpent(); shots.reload();
     } catch (e) { setMsg({ ok: false, text: `第 ${s.shot_order} 镜未提交：${(e as Error).message}` }); }
   };
+  const renderAll = async (tier: Tier) => {
+    try {
+      const r = await api<{ jobs: Job[]; mode: string }>(`/projects/${project.id}/episodes/${episode}/render`, { method: "POST", json: { tier, chain } });
+      const spent = r.jobs.reduce((a, j) => a + Number(j.credit_estimate), 0);
+      setMsg({ ok: true, text: r.mode === "sequential"
+        ? `整集母带按尾帧接力逐镜出片，已提交第 1 镜（预扣 ${spent.toFixed(1)} 积分），后续镜头自动接上`
+        : `已提交 ${r.jobs.length} 个镜头${TIERS.find((t) => t.id === tier)?.label}，预扣 ${spent.toFixed(1)} 积分` });
+      onSpent(); shots.reload();
+    } catch (e) { setMsg({ ok: false, text: (e as Error).message }); }
+  };
   const savePrompt = async (s: Shot, shot_prompt: string) => {
     if (shot_prompt !== s.shot_prompt && shot_prompt.trim()) await api(`/shots/${s.id}`, { method: "PATCH", json: { shot_prompt } });
   };
@@ -46,7 +58,7 @@ export function StoryboardCanvas({ project, onSpent }: { project: Project; onSpe
     <div>
       <div className="mb-6 flex flex-wrap items-end justify-between gap-6">
         <div className="flex items-end gap-4">
-          <h2 className="text-2xl font-semibold">第{episode}集</h2>
+          <h2 className="text-2xl font-semibold">第{episode}集{title ? `　${title}` : ""}</h2>
           {episodes.length > 1 && (
             <select className="field w-auto py-1" value={episode} onChange={(e) => setEpisode(Number(e.target.value))} aria-label="选择集数">
               {episodes.map((n) => <option key={n} value={n}>第 {n} 集</option>)}
@@ -64,9 +76,17 @@ export function StoryboardCanvas({ project, onSpent }: { project: Project; onSpe
           尾帧接力：上一镜的末帧作为下一镜的首帧
         </label>
       </div>
+      {list.length > 0 && (
+        <div className="mb-6 flex flex-wrap items-center gap-3" role="group" aria-label="整集出片">
+          <span className="text-ink-soft">整集出片</span>
+          <button className="btn btn-quiet" onClick={() => renderAll("L0_animatic")}>故事板（免费）</button>
+          <button className="btn btn-quiet" onClick={() => renderAll("L1_draft")}>草稿 {total("L1_draft").toFixed(1)}</button>
+          <button className="btn" onClick={() => renderAll("L2_master")}>母带 {total("L2_master").toFixed(1)}</button>
+        </div>
+      )}
       {msg && <p className={`mb-4 ${msg.ok ? "text-ink" : "text-seal"}`} role="status">{msg.text}</p>}
       {list.length === 0 ? (
-        <p className="text-ink-soft">本集还没有分镜。去「剧本与导入」拆一章小说或导入原片。</p>
+        <p className="text-ink-soft">本集还没有分镜。去「剧本」里写好本集剧本并拆成分镜。</p>
       ) : (
         <div className="silk -mx-4 overflow-x-auto border-y border-celadon-deep/70 px-4 py-6 sm:-mx-8 sm:px-8" role="list" aria-label="分镜长卷">
           <div className="flex items-stretch">
@@ -100,7 +120,8 @@ function ShotPanel({ shot, cost, onRender, onPrompt }: {
   return (
     <article role="listitem" className="flex w-[300px] shrink-0 flex-col" aria-label={`第 ${shot.shot_order} 镜`}>
       <div className="relative aspect-[9/16] max-h-[360px] w-full overflow-hidden border border-ink/70 bg-celadon">
-        {cover ? <img src={cover} alt="" className="h-full w-full object-cover" /> :
+        {shot.preview_url ? <video src={shot.preview_url} controls preload="metadata" poster={cover} className="h-full w-full bg-ink object-cover" /> :
+          cover ? <img src={cover} alt="" className="h-full w-full object-cover" /> :
           <p className="p-4 text-sm text-ink-soft">尚无画面。先在定妆里锁定出场人物与场景。</p>}
         <span className="absolute top-0 left-0 bg-ink px-2 py-0.5 text-paper">{String(shot.shot_order).padStart(2, "0")}</span>
         <span className="absolute top-0 right-0 bg-paper/90 px-2 py-0.5 text-sm">{shot.duration} 秒</span>
