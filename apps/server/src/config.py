@@ -8,6 +8,8 @@ class Settings(BaseSettings):
     storage_dir: str = "./storage"  # local media root served at /media (MinIO/S3 not wired yet)
     default_username: str = "director"
     whisper_size: str = "large-v3"
+    app_token: str = ""  # Bearer token for every API call; empty = auth off (local dev / tests only)
+    media_ticket_ttl: int = 12 * 3600  # seconds a login's /media cookie stays valid
 
 
 settings = Settings()

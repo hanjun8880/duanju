@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -6,6 +7,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from src import auth
 from src.config import settings
 from src.db import SessionLocal
 from src.deps import get_http_client
@@ -21,6 +23,8 @@ __all__ = ["app", "get_http_client"]
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # shortcut: only inline mode resumes polling after a restart; in celery mode re-queue stuck jobs via
     # /admin/jobs/{id}/retry until a beat task is added.
+    if not settings.app_token:
+        logging.getLogger(__name__).warning("APP_TOKEN is empty: API and /media are unauthenticated")
     task = asyncio.create_task(resume_polls(SessionLocal, get_http_client())) \
         if settings.dispatch_mode == "inline" else None
     yield
@@ -29,7 +33,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Director Workbench API", lifespan=lifespan)
-for r in (gateway_api, script_api, lookdev_api, storyboard_api):
+app.middleware("http")(auth.middleware)
+for r in (auth.api, gateway_api, script_api, lookdev_api, storyboard_api):
     app.include_router(r)
 Path(settings.storage_dir).mkdir(parents=True, exist_ok=True)
 app.mount("/media", StaticFiles(directory=settings.storage_dir), name="media")

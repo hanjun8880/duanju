@@ -9,6 +9,7 @@ import { StoryboardCanvas } from "@/features/storyboard-canvas/StoryboardCanvas"
 import { AdminLedger } from "@/features/admin-ledger/AdminLedger";
 import { ScriptRoom } from "@/features/script-room/ScriptRoom";
 import { FinalCut } from "@/features/final-cut/FinalCut";
+import { AuthGate } from "@/features/auth/AuthGate";
 
 // The five steps of making a series, in order.
 const TABS: { id: Tab; label: string }[] = [
@@ -20,7 +21,11 @@ const TABS: { id: Tab; label: string }[] = [
 ];
 const NUM = ["一", "二", "三", "四", "五"];
 
-export default function Workbench() {
+export default function Page() {
+  return <AuthGate><Workbench /></AuthGate>;
+}
+
+function Workbench() {
   const { projectId, setProject, tab, setTab, ledgerOpen, setLedgerOpen } = useWorkbench();
   const projects = useApi<Project[]>("/projects");
   const me = useApi<Me>("/me");
