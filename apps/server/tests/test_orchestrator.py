@@ -65,6 +65,7 @@ async def test_tier_requests(sessionmaker, user_and_project):
 
 async def test_master_chains_previous_last_frame(sessionmaker, user_and_project):
     _, pid = user_and_project
+    await seed_lookdev(sessionmaker, pid)
     async with sessionmaker() as s:
         shots = await orch.import_storyboard(s, pid, 1, BOARD)
     async with sessionmaker() as s, s.begin():
