@@ -59,8 +59,27 @@ async def test_tier_requests(sessionmaker, user_and_project):
         master = await orch.shot_request(s, shots[0].id, "L2_master")
     assert (draft.resolution, draft.duration, draft.model_key) == ("480p", 20, "seedance_2_5_draft")
     assert (master.resolution, master.duration, master.model_key) == ("1080p", 20, "seedance_2_5_spicy")
-    assert master.prompt.startswith("[参考图1-3: 林晚 人物] [参考图4: 怀表 道具] [参考图5-6: 天台 场景]")
-    assert master.return_last_frame is True and len(master.refs.image_urls) == 6
+    # 审查意见改写：参考图在出片时迟绑定（锁定图最多 3 张，未锁定只取 1 张），顺序 人物→场景→道具→模板。
+    # 旧断言是导入时快照的全部 ref_urls（人物→道具→场景，共 6 张）。
+    assert master.prompt.startswith("[参考图1: 林晚 人物] [参考图2: 天台 场景] [参考图3: 怀表 道具]")
+    assert master.return_last_frame is True and len(master.refs.image_urls) == 3
+
+
+async def test_refs_bound_late_from_locked_assets(sessionmaker, user_and_project):
+    _, pid = user_and_project
+    async with sessionmaker() as s:  # storyboard imported before any look-dev exists
+        shots = await orch.import_storyboard(s, pid, 1, BOARD)
+    assert shots[0].refs["asset_names"] == ["林晚", "怀表", "天台"]
+    await seed_lookdev(sessionmaker, pid)
+    async with sessionmaker() as s, s.begin():
+        lw = (await s.execute(select(LookdevAsset).where(LookdevAsset.project_id == pid,
+                                                         LookdevAsset.name == "林晚"))).scalar_one()
+        lw.locked_ref_urls = [f"https://cdn/lock{i}.png" for i in range(5)]
+    async with sessionmaker() as s:
+        req = await orch.shot_request(s, shots[0].id, "L2_master")
+    assert req.refs.image_urls == ["https://cdn/lock0.png", "https://cdn/lock1.png", "https://cdn/lock2.png",
+                                   "https://cdn/r0.png", "https://cdn/w.png"]
+    assert req.prompt.startswith("[参考图1-3: 林晚 人物] [参考图4: 天台 场景] [参考图5: 怀表 道具]")
 
 
 async def test_master_chains_previous_last_frame(sessionmaker, user_and_project):

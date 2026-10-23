@@ -49,10 +49,47 @@ async def import_storyboard(session: AsyncSession, project_id: uuid.UUID, episod
         shots = [Shot(project_id=project_id, episode_number=episode_number, shot_order=s.shot_order,
                       template_id=templates.get(s.suggested_pose_template.lower()), duration=s.duration,
                       shot_prompt=s.five_part_visual_prompt, dialogue_transcript=s.dialogue or None,
-                      refs=_bind_refs([*s.character_names, *s.prop_names, s.scene_name], assets))
-                 for s in board.shots]
+                      refs={**_bind_refs(names, assets), "asset_names": names})
+                 for s in board.shots for names in ([*s.character_names, *s.prop_names, s.scene_name],)]
         session.add_all(shots)
     return shots
+
+
+REF_ORDER = ("character", "scene", "prop")  # then the pose template's stills
+
+
+async def refs_for_episode(session: AsyncSession, asset: LookdevAsset, episode: int) -> list[str]:
+    """TEMPORARY (render team): replaced at merge by lookdev/refs.py from the look-dev team.
+
+    Locked refs (max 3) win; an unlocked asset contributes only its first image.
+    """
+    locked = list(asset.locked_ref_urls or [])
+    return locked[:3] if locked else list(asset.ref_urls or [])[:1]
+
+
+async def bind_refs_late(session: AsyncSession, shot: Shot) -> dict[str, Any]:
+    """Resolve refs at render time from the current look-dev assets (so locking after import takes effect)."""
+    snap = shot.refs or {}
+    names = snap.get("asset_names")
+    if names is None:
+        names = [a["name"] for a in snap.get("assets", [])]
+    if not names:  # remix / hand-made shots carry their own refs
+        return snap
+    rows = (await session.execute(select(LookdevAsset).where(
+        LookdevAsset.project_id == shot.project_id, LookdevAsset.name.in_(names)))).scalars().all()
+    rank = {t: i for i, t in enumerate(REF_ORDER)}
+    rows = sorted(rows, key=lambda a: (rank.get(a.asset_type, len(REF_ORDER)), names.index(a.name)))
+    images: list[str] = []
+    bound: list[dict[str, Any]] = []
+    for a in rows:
+        room = MAX_IMAGES - len(images)
+        urls = (await refs_for_episode(session, a, shot.episode_number))[:room]
+        if not urls:
+            continue
+        bound.append({"id": str(a.id), "name": a.name, "type": a.asset_type,
+                      "range": [len(images) + 1, len(images) + len(urls)]})
+        images += urls
+    return {"images": images, "videos": snap.get("videos", []), "audios": snap.get("audios", []), "assets": bound}
 
 
 def role_prefix(bound: list[dict[str, Any]]) -> str:
@@ -82,7 +119,7 @@ async def shot_request(session: AsyncSession, shot_id: uuid.UUID, tier: str, cha
     prev = (await session.execute(select(Shot).where(
         Shot.project_id == shot.project_id, Shot.episode_number == shot.episode_number,
         Shot.shot_order < shot.shot_order).order_by(Shot.shot_order.desc()).limit(1))).scalar_one_or_none()
-    refs = shot.refs or {}
+    refs = await bind_refs_late(session, shot)
     images = list(refs.get("images", [])) + (list(template.refs) if template else [])
     prompt = shot.shot_prompt
     if refs.get("assets"):
