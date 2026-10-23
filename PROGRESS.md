@@ -117,3 +117,30 @@
 - 网页正文抓取是启发式（按块级标签长度过滤导航/按钮文案），非完整 readability 算法；复杂排版页面可能需要手动贴正文兜底。
 - 「按原文整理成剧本」需要 ANTHROPIC_API_KEY；未配置时明确报错，不是静默失败。
 - 原片拆解用的 faster-whisper 模型较大时，在资源受限环境可能被系统杀进程；生产环境需要给 worker 预留足够内存。
+
+## Team script（编剧组，分支 team/script）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 所有 LLM 调用按环节取 `model_for(stage)`（plan/script/storyboard/reformat/summarize/remix_vision），删除 `DEFAULT_MODEL`/`LIGHT_MODEL` 硬编码 | PASS | `test_llm_routing.py` |
+| `provider=openai_compat` 走 `OPENAI_COMPAT_BASE_URL` 的 `/v1/chat/completions`（`OPENAI_COMPAT_API_KEY`），未配置 → 503 | PASS（传输层桩）/ BLOCKED（无真实端点） | `test_llm_routing.py` |
+| 分镜 ShotSchema：`shot_kind`、`continuous_from_prev`、`speaker`；duration 4–10 秒（提示 4–8 秒为主）；删去两处"15-30 秒长镜头"提示 | PASS | `test_orchestrator.py::test_storyboard_shots_are_short_takes` |
+| `import_storyboard` 写入 shot_kind / continuous_from_prev（首镜强制 false）/ speaker_asset_id（按名称匹配人物定妆卡，未匹配为空） | PASS | `test_orchestrator.py::test_import_storyboard_writes_kind_continuity_and_speaker` |
+| 两段式规划：上限 200 万字；>4 万字时每 4 段一批 summarize 摘要（并发≤3，按片段 sha256 缓存在 `series_bible_json._cache`），plan 出设定，大纲每批≤20 集（共享缓存前缀）；超大章节再切分 | PASS | `test_two_stage_plan.py`（重规划零摘要调用、改一章只重摘一段） |
+| 规划进度写 `series_bible_json._progress`，`GET /projects/{id}/plan/progress`；失败写 error；`bible_text` 与 `project_view` 排除 `_` 开头键 | PASS | `test_two_stage_plan.py` |
+| 每次 LLM 调用写一条 jobs：`task_type='llm.<stage>'`、`model_key='llm_<stage>'`、credit 0、payload {model, provider, usage, usd, stage}；被拒/截断的调用也记账；remix 关键帧识别也记账 | PASS | `test_llm_ledger.py`、`test_production.py` |
+| 迁移 `0007_script`：插入 7 条 `llm_*` model_catalog 占位行（is_active=false，不参与路由） | PASS | 测试库 alembic upgrade head |
+| LLM 单价放 `settings.llm_prices`（USD/百万 token，占位未核实，env `LLM_PRICES` 整表覆盖）；`GET /projects/{id}/llm-usage` 按环节汇总 | PASS | `test_llm_ledger.py` |
+| 前端剧本页：规划时轮询进度、显示编剧 AI 花费 | PASS（单测 + tsc）/ NOT_TESTED（未截图） | `progress.test.ts` |
+| 真实 Claude / OpenAI 兼容调用 | BLOCKED | 无供应商密钥 |
+
+后端 128 passed；ruff、mypy 通过；前端 `pnpm tsc`、`pnpm test:run`（8）通过。
+
+### 改动的旧测试（审查意见要求的行为变更）
+- `test_script_engine.py`：STORYBOARD 时长 15→6；分镜请求模型从写死 `claude-opus-5-5` 改为 `model_for("storyboard").model`。
+- `test_orchestrator.py`：BOARD 第 1 镜时长 20→10（le=10），对应 L1/L2 请求断言同步。
+
+### 已知限制
+- 规划仍是一次同步 HTTP 请求（长篇可能几分钟）；进度靠轮询 `_progress`。同一项目并发两次规划未加锁。
+- 单价是占位值；未知模型 usd 记为 null（`unpriced_calls` 计数），不猜价。
+- openai_compat 只支持纯文本 prompt（remix 关键帧识别仍需 anthropic）。
