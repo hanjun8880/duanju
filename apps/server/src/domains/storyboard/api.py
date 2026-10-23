@@ -12,18 +12,21 @@ from src.deps import Http, Session
 from src.domains.gateway import credit_ledger as ledger
 from src.domains.gateway.api import job_view, submit
 from src.domains.storyboard import shot_orchestrator as orch
-from src.models import Asset, Project, Shot
+from src.models import Asset, Job, Project, Shot
 
 api = APIRouter(prefix="/api/v1")
 
 
-def shot_view(s: Shot, clip: Path | None = None) -> dict[str, Any]:
+def shot_view(s: Shot, clip: Path | None = None, takes: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     return {"id": str(s.id), "episode_number": s.episode_number, "shot_order": s.shot_order,
             "template_id": str(s.template_id) if s.template_id else None, "render_tier": s.render_tier,
             "duration": s.duration, "resolution": s.resolution, "shot_prompt": s.shot_prompt,
             "dialogue_transcript": s.dialogue_transcript, "first_frame_url": s.first_frame_url,
             "last_frame_url": s.last_frame_url, "refs": s.refs, "source_remix_meta": s.source_remix_meta,
-            "status": s.status, "preview_url": media.url_for(clip) if clip and media.root() in clip.parents else None}
+            "status": s.status, "preview_url": media.url_for(clip) if clip and media.root() in clip.parents else None,
+            "shot_kind": s.shot_kind, "continuous_from_prev": s.continuous_from_prev, "keyframe_url": s.keyframe_url,
+            "keyframe_status": s.keyframe_status,
+            "selected_job_id": str(s.selected_job_id) if s.selected_job_id else None, "takes": takes or []}
 
 
 @api.get("/projects/{project_id}/shots")
@@ -35,7 +38,29 @@ async def list_shots(project_id: uuid.UUID, session: Session, episode: int | Non
     clips: dict[uuid.UUID, Path] = {}
     for ep in {s.episode_number for s in shots}:
         clips |= await orch.best_clips(session, project_id, ep)
-    return [shot_view(s, clips.get(s.id)) for s in shots]
+    takes = await orch.shot_takes(session, [s.id for s in shots])
+    return [shot_view(s, clips.get(s.id), takes.get(s.id)) for s in shots]
+
+
+class SelectTake(BaseModel):
+    job_id: uuid.UUID | None = Field(description="a finished video job of this shot; null clears the selection")
+
+
+@api.post("/shots/{shot_id}/select")
+async def select_take(shot_id: uuid.UUID, body: SelectTake, session: Session) -> dict[str, Any]:
+    """Director picks which take goes into the episode (assemble prefers it over tier/newest)."""
+    s = await session.get(Shot, shot_id)
+    if s is None:
+        raise HTTPException(404, "shot not found")
+    if body.job_id is not None:
+        job = await session.get(Job, body.job_id)
+        if job is None or job.shot_id != shot_id or job.status != "success":
+            raise HTTPException(422, "job is not a finished take of this shot")
+    s.selected_job_id = body.job_id
+    await session.commit()
+    await session.refresh(s)
+    takes = await orch.shot_takes(session, [s.id])
+    return shot_view(s, takes=takes.get(s.id))
 
 
 class ShotPatch(BaseModel):
@@ -43,6 +68,8 @@ class ShotPatch(BaseModel):
     dialogue_transcript: str | None = None
     duration: int | None = Field(default=None, ge=4, le=30)
     template_id: uuid.UUID | None = None
+    shot_kind: Literal["dialogue", "action", "establishing", "insert"] | None = None
+    continuous_from_prev: bool | None = None
 
 
 @api.patch("/shots/{shot_id}")
@@ -51,6 +78,8 @@ async def patch_shot(shot_id: uuid.UUID, body: ShotPatch, session: Session) -> d
     if s is None:
         raise HTTPException(404, "shot not found")
     for k, v in body.model_dump(exclude_unset=True).items():
+        if v is None and k in ("shot_kind", "continuous_from_prev"):  # NOT NULL columns
+            continue
         setattr(s, k, v)
     await session.commit()
     await session.refresh(s)
@@ -60,6 +89,7 @@ async def patch_shot(shot_id: uuid.UUID, body: ShotPatch, session: Session) -> d
 class RenderRequest(BaseModel):
     tier: Literal["L0_animatic", "L1_draft", "L2_master", "L3_post"]
     chain: bool = True
+    final: bool = Field(default=False, description="L2 only: 1080p final render instead of the 720p per-kind model")
 
 
 @api.post("/shots/{shot_id}/render", status_code=201)
@@ -71,7 +101,7 @@ async def render_shot(shot_id: uuid.UUID, body: RenderRequest, session: Session,
     if body.tier in ("L0_animatic", "L3_post"):
         response.status_code = 202
         return await _local_render(session, shot, body.tier)
-    return await _cloud_render(session, shot_id, body.tier, body.chain, bg, http)
+    return await _cloud_render(session, shot_id, body.tier, body.chain, bg, http, final=body.final)
 
 
 async def _local_render(session: AsyncSession, shot: Shot, tier: str) -> dict[str, Any]:
@@ -89,12 +119,13 @@ async def _local_render(session: AsyncSession, shot: Shot, tier: str) -> dict[st
 
 
 async def _cloud_render(session: AsyncSession, shot_id: uuid.UUID, tier: str, chain: bool, bg: BackgroundTasks,
-                        http: Http, batch: bool = False) -> dict[str, Any]:
+                        http: Http, batch: bool = False, final: bool = False) -> dict[str, Any]:
     try:
-        req = await orch.shot_request(session, shot_id, tier, chain=chain)
+        req = await orch.shot_request(session, shot_id, tier, chain=chain, final=final)
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
-    job = await submit(req, session, bg, http, meta={"render_tier": tier, "chain": chain, "batch": batch})
+    job = await submit(req, session, bg, http,
+                       meta={"render_tier": tier, "chain": chain, "batch": batch, "final": final})
     return job_view(job)
 
 
@@ -110,12 +141,12 @@ async def render_episode(project_id: uuid.UUID, n: int, body: RenderRequest, ses
     if body.tier == "L3_post":
         raise HTTPException(422, "L3 runs per shot on a finished master")
     if body.tier == "L2_master" and body.chain:
-        return {"jobs": [await _cloud_render(session, shots[0].id, body.tier, True, bg, http, batch=True)],
-                "mode": "sequential"}
+        return {"jobs": [await _cloud_render(session, shots[0].id, body.tier, True, bg, http, batch=True,
+                                             final=body.final)], "mode": "sequential"}
     jobs = []
     for s in shots:
         jobs.append(await _local_render(session, s, body.tier) if body.tier == "L0_animatic"
-                    else await _cloud_render(session, s.id, body.tier, body.chain, bg, http))
+                    else await _cloud_render(session, s.id, body.tier, body.chain, bg, http, final=body.final))
     return {"jobs": jobs, "mode": "parallel"}
 
 

@@ -64,15 +64,30 @@ async def _refund(sm: async_sessionmaker[AsyncSession], job_id: uuid.UUID, reaso
         await ledger.refund_job(s, job_id, reason=reason, status=status, error=error)
 
 
+async def _shot_failed(sm: async_sessionmaker[AsyncSession], client: httpx.AsyncClient, job: Job) -> None:
+    """A shot render is out of options: mark it failed; a batch resumes at the next non-continuous shot."""
+    p = job.request_payload
+    if not job.shot_id or "render_tier" not in p:
+        return
+    from src.domains.storyboard import shot_orchestrator as orch
+    try:
+        await orch.on_render_failed(sm, client, job.shot_id, p["render_tier"], chain=bool(p.get("chain")),
+                                    final=bool(p.get("final")), batch=bool(p.get("batch")))
+    except Exception:  # never mask the original provider error
+        log.exception("after-failure handling for shot %s", job.shot_id)
+
+
 async def _failover(sm: async_sessionmaker[AsyncSession], job: Job, model: ModelCatalog,
                     client: httpx.AsyncClient, error: str) -> Job:
     if not model.fallback_model_key or job.request_payload.get("failover_of"):
+        await _shot_failed(sm, client, job)
         raise ProviderUnavailable(error)  # one hop only: seedance<->wan must not ping-pong
     async with sm() as s:
         owner = (await s.execute(select(Project.user_id).where(Project.id == job.project_id))).scalar_one()
     req = JobCreateRequest.model_validate(job.request_payload["request"])
     async with sm() as s:
-        meta: dict[str, Any] = {k: job.request_payload[k] for k in ("render_tier", "chain") if k in job.request_payload}
+        meta: dict[str, Any] = {k: job.request_payload[k] for k in ("render_tier", "chain", "batch", "final")
+                                if k in job.request_payload}
         new = await create_job(s, user_id=owner, req=req, model_key=model.fallback_model_key, failover_of=job.id,
                                meta=meta)
     log.warning("failover %s -> %s (%s)", job.model_key, new.model_key, error)
@@ -95,9 +110,11 @@ async def dispatch_job(sm: async_sessionmaker[AsyncSession], job_id: uuid.UUID, 
                                    task_type=job.task_type, canonical=canonical)
     except ProviderNotConfigured as e:
         await _refund(sm, job.id, "cancel_refund", str(e), status="cancelled")
+        await _shot_failed(sm, client, job)
         raise
     except ProviderRejected as e:
         await _refund(sm, job.id, "provider_4xx_refund", str(e))
+        await _shot_failed(sm, client, job)
         raise
     except ProviderRetryable as e:
         await _refund(sm, job.id, "timeout_refund" if e.timeout else "provider_5xx_refund", str(e))
@@ -134,6 +151,7 @@ async def poll_until_done(sm: async_sessionmaker[AsyncSession], client: httpx.As
             cb = await adapter.poll(client, api_base=model.api_base, provider_job_id=job.provider_job_id)
         except ProviderRejected as e:
             await _refund(sm, job.id, "provider_4xx_refund", str(e))
+            await _shot_failed(sm, client, job)
             return None
         except ProviderRetryable as e:
             log.warning("poll %s: %s", job.id, e)
@@ -216,7 +234,8 @@ async def _after_success(sm: async_sessionmaker[AsyncSession], client: httpx.Asy
         async with sm() as s:
             await orch.on_shot_rendered(s, job.shot_id, p["render_tier"], urls.get("last_frame"), bool(p.get("chain")))
         if p.get("batch"):
-            await orch.render_next(sm, client, job.shot_id, p["render_tier"], bool(p.get("chain")))
+            await orch.render_next(sm, client, job.shot_id, p["render_tier"], bool(p.get("chain")),
+                                   bool(p.get("final")))
 
 
 async def queue_dispatch(sm: async_sessionmaker[AsyncSession], client: httpx.AsyncClient, job: Job,

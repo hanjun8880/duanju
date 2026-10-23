@@ -1,6 +1,7 @@
 import json
 from decimal import Decimal
 
+import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, text
 
@@ -91,26 +92,225 @@ async def test_tier_requests(sessionmaker, user_and_project):
         shots = await orch.import_storyboard(s, pid, 1, BOARD)
     async with sessionmaker() as s:
         draft = await orch.shot_request(s, shots[0].id, "L1_draft")
-        master = await orch.shot_request(s, shots[0].id, "L2_master")
+        # 路由改写：1080p 只在显式 final 时使用（gateway/routing.py），旧断言默认 L2 即 1080p。
+        master = await orch.shot_request(s, shots[0].id, "L2_master", final=True)
+        everyday = await orch.shot_request(s, shots[0].id, "L2_master")
     assert (draft.resolution, draft.duration, draft.model_key) == ("480p", 10, "seedance_2_5_draft")
     assert (master.resolution, master.duration, master.model_key) == ("1080p", 10, "seedance_2_5_spicy")
-    assert master.prompt.startswith("[参考图1-3: 林晚 人物] [参考图4: 怀表 道具] [参考图5-6: 天台 场景]")
-    assert master.return_last_frame is True and len(master.refs.image_urls) == 6
+    assert (everyday.resolution, everyday.model_key) == ("720p", "seedance_2_5_spicy")
+    # 审查意见改写：参考图在出片时迟绑定（锁定图最多 3 张，未锁定只取 1 张），顺序 人物→场景→道具→模板。
+    # 旧断言是导入时快照的全部 ref_urls（人物→道具→场景，共 6 张）。
+    assert master.prompt.startswith("[参考图1: 林晚 人物] [参考图2: 天台 场景] [参考图3: 怀表 道具]")
+    assert master.return_last_frame is True and len(master.refs.image_urls) == 3
+
+
+BOARD3 = EpisodeStoryboardOutput.model_validate({**BOARD.model_dump(), "shots": [
+    *BOARD.model_dump()["shots"],
+    {"shot_order": 3, "shot_scale": "MS", "duration": 6, "camera_motion": "pan",
+     "five_part_visual_prompt": "1.中景 2.摇 3.林晚离开 4.暮色 5.定格", "dialogue": "",
+     "character_names": ["林晚"], "prop_names": [], "scene_name": "天台", "suggested_pose_template": "none"}]})
+
+
+async def batch_shots(sessionmaker, pid):
+    async with sessionmaker() as s:
+        shots = await orch.import_storyboard(s, pid, 1, BOARD3)
+    async with sessionmaker() as s, s.begin():
+        second = await s.get(Shot, shots[1].id)
+        assert second is not None
+        second.continuous_from_prev = True  # 1->2 is one continuous take, 3 is a cut
+    return shots
+
+
+async def test_failed_chain_skips_to_next_cut(sessionmaker, user_and_project, monkeypatch):
+    _, pid = user_and_project
+    shots = await batch_shots(sessionmaker, pid)
+    queued = []
+
+    async def fake_queue(sm, client, shot_id, tier, chain, final):
+        queued.append((shot_id, tier, chain, final))
+        return shot_id
+    monkeypatch.setattr(orch, "_queue_shot", fake_queue)
+    resumed = await orch.on_render_failed(sessionmaker, None, shots[0].id, "L2_master", chain=True, batch=True)
+    assert resumed == shots[2].id and queued == [(shots[2].id, "L2_master", True, False)]
+    async with sessionmaker() as s:
+        rows = (await s.execute(select(Shot).where(Shot.project_id == pid).order_by(Shot.shot_order))).scalars().all()
+    assert [r.status for r in rows] == ["failed", "failed", "pending"]  # 2 needs 1's last frame
+
+
+async def test_batch_failover_keeps_batch_and_dead_vendors_resume_at_cut(
+        engine, sessionmaker, user_and_project, vendor, monkeypatch):  # noqa: F811
+    from src.domains.gateway import router
+    uid, pid = user_and_project
+    v, client = vendor
+    async with engine.begin() as conn:
+        await conn.execute(text("UPDATE users SET credits=1000, daily_limit_credits=1000 WHERE id=:u"), {"u": uid})
+    shots = await batch_shots(sessionmaker, pid)
+    queued = []
+
+    async def fake_queue(sm, client, shot_id, tier, chain, final):
+        queued.append(shot_id)
+        return shot_id
+    monkeypatch.setattr(orch, "_queue_shot", fake_queue)
+    meta = {"render_tier": "L2_master", "chain": True, "batch": True, "final": False}
+    async with sessionmaker() as s:
+        req = await orch.shot_request(s, shots[0].id, "L2_master")
+    v.behaviour["seedance.test"] = 503
+    async with sessionmaker() as s:
+        job = await router.create_job(s, user_id=uid, req=req, meta=meta)
+    moved = await router.dispatch_job(sessionmaker, job.id, client)
+    assert moved.model_key == "wan3_spicy" and moved.request_payload["batch"] is True
+    v.behaviour["wan.test"] = 500
+    async with sessionmaker() as s:
+        job2 = await router.create_job(s, user_id=uid, req=req, meta=meta)
+    with pytest.raises(router.ProviderUnavailable):
+        await router.dispatch_job(sessionmaker, job2.id, client)
+    assert queued == [shots[2].id]
+
+
+async def add_take(sessionmaker, pid, shot_id, tier):
+    from src.models import Asset, Job
+    f = media.root() / "renders" / f"take-{shot_id}-{tier}.mp4"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_bytes(b"mp4")
+    async with sessionmaker() as s, s.begin():
+        job = Job(shot_id=shot_id, project_id=pid, task_type="video.i2v", model_key="seedance_2_5_spicy",
+                  request_payload={"render_tier": tier}, status="success")
+        s.add(job)
+        await s.flush()
+        s.add(Asset(job_id=job.id, project_id=pid, kind="video", s3_key=media.url_for(f)))
+        return job.id, f
+
+
+async def test_select_take_overrides_best_clip(sessionmaker, user_and_project):
+    _, pid = user_and_project
+    async with sessionmaker() as s:
+        shots = await orch.import_storyboard(s, pid, 1, BOARD)
+    draft_id, draft_file = await add_take(sessionmaker, pid, shots[0].id, "L1_draft")
+    master_id, master_file = await add_take(sessionmaker, pid, shots[0].id, "L2_master")
+    other_id, _ = await add_take(sessionmaker, pid, shots[1].id, "L1_draft")
+    async with sessionmaker() as s:
+        assert (await orch.best_clips(s, pid, 1))[shots[0].id] == master_file.resolve()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        bad = await c.post(f"/api/v1/shots/{shots[0].id}/select", json={"job_id": str(other_id)})
+        assert bad.status_code == 422
+        r = await c.post(f"/api/v1/shots/{shots[0].id}/select", json={"job_id": str(draft_id)})
+        assert r.status_code == 200 and r.json()["selected_job_id"] == str(draft_id)
+        listed = (await c.get(f"/api/v1/projects/{pid}/shots", params={"episode": 1})).json()
+    async with sessionmaker() as s:
+        assert (await orch.best_clips(s, pid, 1))[shots[0].id] == draft_file.resolve()
+    first = listed[0]
+    assert first["selected_job_id"] == str(draft_id) and first["shot_kind"] == "dialogue"
+    assert first["continuous_from_prev"] is False and first["keyframe_status"] == "none"
+    assert "keyframe_url" in first
+    assert {t["job_id"] for t in first["takes"]} == {str(draft_id), str(master_id)}
+    assert {t["render_tier"] for t in first["takes"]} == {"L1_draft", "L2_master"}
+    assert all(t["url"].startswith("/media/") for t in first["takes"])
+
+
+async def test_master_model_routed_by_shot_kind(sessionmaker, user_and_project, monkeypatch):
+    _, pid = user_and_project
+    async with sessionmaker() as s:
+        shots = await orch.import_storyboard(s, pid, 1, BOARD)
+    async with sessionmaker() as s, s.begin():
+        second = await s.get(Shot, shots[1].id)
+        assert second is not None
+        second.shot_kind = "action"
+    async with sessionmaker() as s:
+        action = await orch.shot_request(s, shots[1].id, "L2_master")
+        final = await orch.shot_request(s, shots[1].id, "L2_master", final=True)
+    assert (action.model_key, action.resolution) == ("wan3_spicy", "720p")
+    assert (final.model_key, final.resolution) == ("seedance_2_5_spicy", "1080p")
+    monkeypatch.setenv("MODEL_VIDEO_ACTION", "seedance_2_5_spicy")
+    async with sessionmaker() as s:
+        overridden = await orch.shot_request(s, shots[1].id, "L2_master")
+    assert overridden.model_key == "seedance_2_5_spicy"
+
+
+async def test_refs_bound_late_from_locked_assets(sessionmaker, user_and_project):
+    _, pid = user_and_project
+    async with sessionmaker() as s:  # storyboard imported before any look-dev exists
+        shots = await orch.import_storyboard(s, pid, 1, BOARD)
+    assert shots[0].refs["asset_names"] == ["林晚", "怀表", "天台"]
+    await seed_lookdev(sessionmaker, pid)
+    async with sessionmaker() as s, s.begin():
+        lw = (await s.execute(select(LookdevAsset).where(LookdevAsset.project_id == pid,
+                                                         LookdevAsset.name == "林晚"))).scalar_one()
+        lw.locked_ref_urls = [f"https://cdn/lock{i}.png" for i in range(5)]
+    async with sessionmaker() as s:
+        req = await orch.shot_request(s, shots[0].id, "L2_master")
+    assert req.refs.image_urls == ["https://cdn/lock0.png", "https://cdn/lock1.png", "https://cdn/lock2.png",
+                                   "https://cdn/r0.png", "https://cdn/w.png"]
+    assert req.prompt.startswith("[参考图1-3: 林晚 人物] [参考图4: 天台 场景] [参考图5: 怀表 道具]")
 
 
 async def test_master_chains_previous_last_frame(sessionmaker, user_and_project):
     _, pid = user_and_project
+    await seed_lookdev(sessionmaker, pid)
     async with sessionmaker() as s:
         shots = await orch.import_storyboard(s, pid, 1, BOARD)
     async with sessionmaker() as s, s.begin():
         first = await s.get(Shot, shots[0].id)
         assert first is not None
         first.last_frame_url = "https://v/last1.png"
+    # 审查意见 P0 改写：旧断言要求任何下一镜都用上一镜尾帧作首帧（并因首帧/参考互斥而丢掉全部参考图）。
+    # 现在只有 continuous_from_prev=true 的镜头才接上一镜尾帧，其它镜头无首帧、走参考图模式。
+    async with sessionmaker() as s:
+        cut = await orch.shot_request(s, shots[1].id, "L2_master", chain=True)
+    assert cut.first_frame_url is None and cut.refs.image_urls  # hard cut keeps its character refs
+    async with sessionmaker() as s, s.begin():
+        second = await s.get(Shot, shots[1].id)
+        assert second is not None
+        second.continuous_from_prev = True
+        second.first_frame_url = "https://stale/ignored.png"
     async with sessionmaker() as s:
         chained = await orch.shot_request(s, shots[1].id, "L2_master", chain=True)
         unchained = await orch.shot_request(s, shots[1].id, "L2_master", chain=False)
     assert chained.first_frame_url == "https://v/last1.png" and not chained.refs.any()
     assert unchained.first_frame_url is None
+
+
+async def test_first_frame_only_from_approved_keyframe(sessionmaker, user_and_project):
+    _, pid = user_and_project
+    await seed_lookdev(sessionmaker, pid)
+    async with sessionmaker() as s:
+        shots = await orch.import_storyboard(s, pid, 1, BOARD)
+    async with sessionmaker() as s, s.begin():
+        first = await s.get(Shot, shots[0].id)
+        assert first is not None
+        first.keyframe_url, first.keyframe_status = "https://k/1.png", "ready"
+        first.first_frame_url = "https://stale/manual.png"  # stray value must not leak in as a first frame
+    async with sessionmaker() as s:
+        pending = await orch.shot_request(s, shots[0].id, "L2_master")
+    assert pending.first_frame_url is None and pending.refs.image_urls
+    async with sessionmaker() as s, s.begin():
+        first = await s.get(Shot, shots[0].id)
+        assert first is not None
+        first.keyframe_status = "approved"
+    async with sessionmaker() as s:
+        approved = await orch.shot_request(s, shots[0].id, "L2_master")
+        draft = await orch.shot_request(s, shots[0].id, "L1_draft")
+    assert approved.first_frame_url == "https://k/1.png"
+    assert draft.first_frame_url == "https://k/1.png"
+
+
+async def test_last_frame_only_written_to_continuous_next(sessionmaker, user_and_project):
+    _, pid = user_and_project
+    async with sessionmaker() as s:
+        shots = await orch.import_storyboard(s, pid, 1, BOARD)
+    async with sessionmaker() as s:
+        await orch.on_shot_rendered(s, shots[0].id, "L2_master", "https://v/a.png", chain=True)
+    async with sessionmaker() as s:
+        nxt = await s.get(Shot, shots[1].id)
+        assert nxt is not None and nxt.first_frame_url is None
+    async with sessionmaker() as s, s.begin():
+        nxt = await s.get(Shot, shots[1].id)
+        assert nxt is not None
+        nxt.continuous_from_prev = True
+    async with sessionmaker() as s:
+        await orch.on_shot_rendered(s, shots[0].id, "L2_master", "https://v/b.png", chain=True)
+    async with sessionmaker() as s:
+        nxt = await s.get(Shot, shots[1].id)
+        assert nxt is not None and nxt.first_frame_url == "https://v/b.png"
 
 
 async def test_render_and_callback_propagates_last_frame(engine, sessionmaker, user_and_project, vendor):  # noqa: F811
@@ -120,8 +320,13 @@ async def test_render_and_callback_propagates_last_frame(engine, sessionmaker, u
         await conn.execute(text("UPDATE users SET credits=1000, daily_limit_credits=1000 WHERE id=:u"), {"u": uid})
     async with sessionmaker() as s:
         shots = await orch.import_storyboard(s, pid, 1, BOARD)
+    async with sessionmaker() as s, s.begin():  # 审查意见 P0：只有连续镜头才接尾帧，这里显式标记第 2 镜连续
+        second = await s.get(Shot, shots[1].id)
+        assert second is not None
+        second.continuous_from_prev = True
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        r = await c.post(f"/api/v1/shots/{shots[0].id}/render", json={"tier": "L2_master", "chain": True})
+        r = await c.post(f"/api/v1/shots/{shots[0].id}/render",  # final=True: keep the 1080p cost check below
+                         json={"tier": "L2_master", "chain": True, "final": True})
         assert r.status_code == 201, r.text
         job_id = r.json()["id"]
         task_id = json.loads(v.calls[-1].content)  # body sent to vendor
