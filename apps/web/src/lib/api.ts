@@ -5,14 +5,37 @@ export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
 }
 
+const TOKEN_KEY = "duanju_token";
+export const UNAUTHORIZED_EVENT = "duanju:unauthorized";
+
+export function getToken(): string | null {
+  return typeof window === "undefined" ? null : window.localStorage.getItem(TOKEN_KEY);
+}
+export function setToken(token: string | null) {
+  if (token) window.localStorage.setItem(TOKEN_KEY, token);
+  else window.localStorage.removeItem(TOKEN_KEY);
+}
+
+/** Merges the APP_TOKEN bearer (if any) into caller headers; caller headers win except Authorization. */
+export function withAuth(headers: HeadersInit | undefined, token: string | null): Record<string, string> {
+  const out: Record<string, string> = {};
+  new Headers(headers).forEach((v, k) => { out[k] = v; });
+  if (token) out["authorization"] = `Bearer ${token}`;
+  return out;
+}
+
 export async function api<T>(path: string, init?: RequestInit & { json?: unknown }): Promise<T> {
   const { json, ...rest } = init ?? {};
+  const headers = json !== undefined ? { "content-type": "application/json", ...rest.headers } : rest.headers;
   const res = await fetch(`/api/v1${path}`, {
     ...rest,
-    headers: json !== undefined ? { "content-type": "application/json", ...rest.headers } : rest.headers,
+    headers: withAuth(headers, getToken()),
     body: json !== undefined ? JSON.stringify(json) : rest.body,
   });
   const data = await res.json().catch(() => null);
+  if (res.status === 401 && path !== "/auth/login" && typeof window !== "undefined") {
+    window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+  }
   if (!res.ok) {
     const detail = data?.detail;
     throw new ApiError(res.status, typeof detail === "string" ? detail : JSON.stringify(detail ?? res.statusText));
@@ -98,3 +121,8 @@ export const putStage = (body: { stage: string; model: string | null; resolution
 export const putBudget = (projectId: string, budgetUsd: string | null, episode?: number) =>
   api(episode ? `/projects/${projectId}/episodes/${episode}/budget` : `/projects/${projectId}/budget`,
     { method: "PUT", json: { budget_usd: budgetUsd } });
+
+/** Checks the APP_TOKEN and refreshes the HttpOnly /media cookie. Empty token works when auth is off. */
+export function login(token: string) {
+  return api<{ ok: boolean; expires_at: number; auth_enabled: boolean }>("/auth/login", { method: "POST", json: { token } });
+}

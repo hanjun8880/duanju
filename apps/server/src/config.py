@@ -23,6 +23,11 @@ class Settings(BaseSettings):
         "seedance_2_5_spicy": {"480p": 0.4, "720p": 1.0, "1080p": round(0.569 / 0.231, 4)},
         "wan3_spicy": {"720p": 1.0, "1080p": round(0.165 / 0.083, 4)},
     }
+    # Vendor video clips carry their own (per-shot, inconsistent) voices only when this is on. Off: renders ask
+    # for silent clips and the episode dialogue track is character TTS ("tts"); on: default track is "native".
+    video_native_audio: bool = False
+    app_token: str = ""  # Bearer token for every API call; empty = auth off (local dev / tests only)
+    media_ticket_ttl: int = 12 * 3600  # seconds a login's /media cookie stays valid
 
 
 settings = Settings()

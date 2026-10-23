@@ -1,3 +1,18 @@
+# Dev:  docker compose up -d postgres redis minio        (only these start; all ports bound to 127.0.0.1)
+# Prod: APP_TOKEN=... docker compose --profile prod up -d  (api / worker / web; web is the only public entry,
+#       still bound to 127.0.0.1 — put a TLS reverse proxy or an SSH tunnel in front of it)
+x-server-env: &server-env
+  DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/duanju
+  REDIS_URL: redis://redis:6379/0
+  STORAGE_DIR: /data/storage
+  DISPATCH_MODE: celery
+  APP_TOKEN: ${APP_TOKEN:-}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  ARK_API_KEY: ${ARK_API_KEY:-}
+  VOLC_TTS_APPID: ${VOLC_TTS_APPID:-}
+  VOLC_TTS_TOKEN: ${VOLC_TTS_TOKEN:-}
+  MINIMAX_API_KEY: ${MINIMAX_API_KEY:-}
+
 services:
   postgres:
     image: postgres:16
@@ -5,22 +20,54 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: duanju
-    ports: ["5432:5432"]
+    ports: ["127.0.0.1:5432:5432"]
     volumes: [pgdata:/var/lib/postgresql/data]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
   redis:
     image: redis:7
-    ports: ["6379:6379"]
+    ports: ["127.0.0.1:6379:6379"]
   minio:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
-    ports: ["9000:9000", "9001:9001"]
+    ports: ["127.0.0.1:9000:9000", "127.0.0.1:9001:9001"]
     volumes: [miniodata:/data]
+
+  api:
+    profiles: [prod]
+    build: ./apps/server
+    command: sh -c "test -n \"$$APP_TOKEN\" || { echo APP_TOKEN must be set >&2; exit 1; }; uv run alembic upgrade head && uv run uvicorn src.main:app --host 0.0.0.0 --port 8000"
+    environment: *server-env
+    volumes: [storage:/data/storage]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_started}
+    ports: ["127.0.0.1:8000:8000"]
+    restart: unless-stopped
+  worker:
+    profiles: [prod]
+    build: ./apps/server
+    command: >
+      uv run celery -A src.queue worker -c 2
+      -Q high_priority,local_post,video.seedance_2_5_spicy,video.seedance_2_5_draft,video.wan3_spicy
+    environment: *server-env
+    volumes: [storage:/data/storage]
+    depends_on: [api]
+    restart: unless-stopped
+  web:
+    profiles: [prod]
+    build: ./apps/web
+    environment:
+      BACKEND_URL: http://api:8000
+    depends_on: [api]
+    ports: ["127.0.0.1:3000:3000"]
+    restart: unless-stopped
+
 volumes:
   pgdata:
   miniodata:
+  storage:
