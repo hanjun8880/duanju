@@ -1,12 +1,6 @@
-/** Shapes of GET /projects/{id}/plan/progress and /llm-usage (local until openapi/contracts are regenerated). */
-export type PlanProgress = {
-  stage: "idle" | "summarize" | "plan" | "outline" | "done" | "error";
-  done?: number; total?: number; episodes?: number; error?: string; cached_segments?: number;
-};
-export type LlmUsage = {
-  calls: number; total_usd: number;
-  by_stage: Record<string, { calls: number; usd: number; input_tokens: number; output_tokens: number; unpriced_calls: number }>;
-};
+import type { LlmUsage, PlanProgress } from "@/lib/contracts";
+
+export type { LlmUsage, PlanProgress };
 
 const STAGE_LABEL: Record<string, string> = { summarize: "摘要", plan: "规划", script: "剧本", storyboard: "分镜", reformat: "整理", remix_vision: "原片识别" };
 

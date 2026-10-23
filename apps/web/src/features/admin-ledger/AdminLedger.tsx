@@ -1,16 +1,10 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { api, putBudget, putStage, useApi } from "@/lib/api";
-import type { Job, LedgerRow, Model } from "@/lib/contracts";
+import type { Job, LedgerRow, Model, ProjectCosts, StageRow } from "@/lib/contracts";
 import { useWorkbench } from "@/lib/store";
-import { type ProjectCosts, STAGE_LABEL, budgetUse, usd } from "@/features/keyframe-review/money";
+import { PHASE_LABEL, STAGE_LABEL, budgetUse, usd } from "@/features/keyframe-review/money";
 
-type JobX = Job & { usd?: string; stage?: string | null; cached_from?: string | null };
-type ModelX = Model & { usd_per_unit?: string | null };
-interface StageRow {
-  stage: string; kind: string; model: string; provider: string; resolution: string | null; note: string;
-  overridden: boolean; default: { model: string; provider: string; resolution: string | null };
-}
 type View = "ledger" | "stages" | "costs";
 const VIEWS: { id: View; label: string }[] = [{ id: "costs", label: "花费" }, { id: "stages", label: "模型分工" }, { id: "ledger", label: "账本与模型" }];
 
@@ -24,8 +18,8 @@ const STATUS: Record<string, string> = {
 };
 
 export function AdminLedger({ onClose }: { onClose: () => void }) {
-  const models = useApi<ModelX[]>("/admin/models");
-  const jobs = useApi<JobX[]>("/admin/jobs?limit=30");
+  const models = useApi<Model[]>("/admin/models");
+  const jobs = useApi<Job[]>("/admin/jobs?limit=30");
   const ledger = useApi<LedgerRow[]>("/ledger?limit=30");
   const stages = useApi<StageRow[]>("/admin/stages");
   const { projectId } = useWorkbench();
@@ -87,6 +81,7 @@ export function AdminLedger({ onClose }: { onClose: () => void }) {
                 ))}
               </tbody>
             </table>
+            {(costs.data.by_phase ?? []).length > 0 && <p className="text-ink-soft">按大类：{costs.data.by_phase.map((p) => `${PHASE_LABEL[p.phase] ?? p.phase} ${usd(p.usd)}`).join(" · ")}</p>}
             {costs.data.by_episode.length > 0 && <p className="text-ink-soft">按集：{costs.data.by_episode.map((e) => `第${e.episode_number}集 ${usd(e.usd)}`).join(" · ")}</p>}
             <p className="text-xs text-ink-soft">美元为参考价（第三方 2026-10，未经官方核实），可在“账本与模型”里改单价。</p>
           </div>

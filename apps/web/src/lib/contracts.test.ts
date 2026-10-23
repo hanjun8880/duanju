@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import openapi from "./openapi.json";
-import { JobCreateRequest, MultimodalRefs } from "./contracts";
+import { JobCreateRequest, MultimodalRefs, RenderRequest } from "./contracts";
 
 const schemas = (openapi as { components: { schemas: Record<string, { properties: Record<string, unknown>; required?: string[] }> } }).components.schemas;
 
@@ -8,6 +8,7 @@ describe("Zod contracts mirror the FastAPI/Pydantic OpenAPI schema", () => {
   it.each([
     ["JobCreateRequest", JobCreateRequest],
     ["MultimodalRefs", MultimodalRefs],
+    ["RenderRequest", RenderRequest],
   ] as const)("%s has exactly the backend fields", (name, zod) => {
     expect(Object.keys(zod.shape).sort()).toEqual(Object.keys(schemas[name].properties).sort());
     const required = Object.entries(zod.shape).filter(([, v]) => !v.isOptional()).map(([k]) => k).sort();

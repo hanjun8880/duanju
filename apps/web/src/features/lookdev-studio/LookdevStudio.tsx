@@ -1,11 +1,10 @@
 "use client";
 import { useState } from "react";
-import { api, lookdevGenerate, lookdevLock, useApi, useBusySet, type LookdevKind } from "@/lib/api";
-import type { LookdevAsset as BaseAsset, Project, Template } from "@/lib/contracts";
+import { api, lookdevGenerate, lookdevLock, useApi, useBusySet } from "@/lib/api";
+import type { LookdevAsset, LookdevKind, Project, Template } from "@/lib/contracts";
 import { MAX_LOCKED, toggleLock } from "./lock";
 
 // locked_ref_urls is served by the API; contracts.ts is regenerated at merge time.
-type LookdevAsset = BaseAsset & { locked_ref_urls?: string[] };
 
 const KIT: { kind: LookdevKind; label: string; types: string[] }[] = [
   { kind: "portrait", label: "定妆", types: ["character", "prop", "scene"] },

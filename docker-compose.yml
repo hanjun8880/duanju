@@ -52,7 +52,7 @@ services:
     profiles: [prod]
     build: ./apps/server
     command: >
-      uv run celery -A src.queue worker -c 2
+      uv run celery -A src.queue worker -c 2 -I src.domains.remix.tasks
       -Q high_priority,local_post,video.seedance_2_5_spicy,video.seedance_2_5_draft,video.wan3_spicy
     environment: *server-env
     volumes: [storage:/data/storage]

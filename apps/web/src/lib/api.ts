@@ -1,5 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { LookdevEstimate, LookdevJob, LookdevKind, RemixEstimate, RemixProject, RemixSource, RemixSpec } from "./contracts";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -86,11 +87,8 @@ export function useBusySet<K>() {
   return { busy, run };
 }
 
-// --- look-dev (team/lookdev) ---
-export type LookdevKind = "portrait" | "turnaround" | "expressions" | "costume";
-export type LookdevJob = { id: string; status: string; credit_estimate: string; cached: boolean; kind: LookdevKind };
-export type LookdevEstimate = { kind: LookdevKind; images: number; usd: number; cached: boolean };
 
+// --- look-dev ---
 export function lookdevGenerate(id: string, kind: LookdevKind = "portrait", note?: string, force = false) {
   return api<LookdevJob>(`/lookdev/${id}/generate`, { method: "POST", json: { kind, note, force } });
 }
@@ -105,7 +103,7 @@ export function lookdevUnlock(id: string, urls?: string[]) {
   return api<{ locked_ref_urls: string[] }>(`/lookdev/${id}/unlock`, { method: "POST", json: urls ? { urls } : {} });
 }
 
-// ---- ledger team: keyframes, stage routing, money (types live with the features until contracts regenerate) ----
+// ---- keyframes, stage routing, money ----
 export const keyframeApi = {
   generate: (shotId: string, force = false) => api(`/shots/${shotId}/keyframe${force ? "?force=true" : ""}`, { method: "POST" }),
   generateEpisode: (projectId: string, n: number, onlyMissing = true) =>
@@ -127,29 +125,14 @@ export function login(token: string) {
   return api<{ ok: boolean; expires_at: number; auth_enabled: boolean }>("/auth/login", { method: "POST", json: { token } });
 }
 
-// --- remix studio (team/remix): types live here because contracts.ts is regenerated after merge ---
-export type RemixMode = "recast" | "restyle" | "replot" | "sequel" | "spinoff" | "condense";
-export interface RemixSpec {
-  modes: RemixMode[]; recast?: Record<string, string>; style?: string; plot_direction?: string;
-  spinoff_focus?: string; condense_ratio?: number; episode_count?: number;
-}
-export interface RemixSource {
-  episode_number: number; status: string; progress: number; sha256: string | null; cache_hit: boolean;
-  shots: number | null; kept: number | null; error: string | null; video_path: string;
-}
-export interface RemixEstimate {
-  model: string; price_verified: boolean;
-  episodes: { episode_number: number; status: string; shots?: number; images: number | null; images_without_dedupe?: number; usd: number | null }[];
-  total: { images: number; batches: number; usd: number | null };
-}
-export interface RemixProject { id: string; title: string; category: string; status: string; episodes?: number }
 
+// --- remix studio ---
 const rx = (pid: string) => `/remix/projects/${pid}`;
 export const remixApi = {
   sources: (pid: string) => api<RemixSource[]>(`${rx(pid)}/sources`),
   register: (pid: string, episode_number: number, video_path: string) =>
     api<RemixSource>(`${rx(pid)}/sources`, { method: "POST", json: { episode_number, video_path } }),
-  remove: (pid: string, ep: number) => fetch(`/api/v1${rx(pid)}/sources/${ep}`, { method: "DELETE" }),
+  remove: (pid: string, ep: number) => api<null>(`${rx(pid)}/sources/${ep}`, { method: "DELETE" }), // bearer + error detail
   deconstruct: (pid: string, describe: boolean, episodes?: number[]) =>
     api<{ queued: number[] }>(`${rx(pid)}/deconstruct`, { method: "POST", json: { describe, episodes } }),
   estimate: (pid: string) => api<RemixEstimate>(`${rx(pid)}/estimate`),

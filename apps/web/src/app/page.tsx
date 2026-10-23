@@ -6,6 +6,7 @@ import { useWorkbench, type Tab } from "@/lib/store";
 import { ProjectImporter } from "@/features/project-importer/ProjectImporter";
 import { LookdevStudio } from "@/features/lookdev-studio/LookdevStudio";
 import { StoryboardCanvas } from "@/features/storyboard-canvas/StoryboardCanvas";
+import { KeyframeReview } from "@/features/keyframe-review/KeyframeReview";
 import { AdminLedger } from "@/features/admin-ledger/AdminLedger";
 import { ScriptRoom } from "@/features/script-room/ScriptRoom";
 import { FinalCut } from "@/features/final-cut/FinalCut";
@@ -73,7 +74,12 @@ function Workbench() {
         {tab === "source" && <ProjectImporter projects={projects.data ?? []} onChanged={() => { projects.reload(); me.reload(); }} />}
         {tab === "script" && (current ? <ScriptRoom project={current} onChanged={projects.reload} /> : <NeedProject />)}
         {tab === "lookdev" && (current ? <LookdevStudio project={current} onSpent={me.reload} /> : <NeedProject />)}
-        {tab === "storyboard" && (current ? <StoryboardCanvas project={current} onSpent={me.reload} /> : <NeedProject />)}
+        {tab === "storyboard" && (current ? (
+          <>
+            <StoryboardCanvas project={current} onSpent={me.reload} />
+            <div className="mt-10 border-t border-celadon-deep/60 pt-8"><KeyframeReview projectId={current.id} onSpent={me.reload} /></div>
+          </>
+        ) : <NeedProject />)}
         {tab === "final" && (current ? <FinalCut project={current} /> : <NeedProject />)}
       </main>
 

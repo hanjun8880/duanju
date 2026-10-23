@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { api, remixApi, useApi, useBusySet, type RemixEstimate, type RemixMode, type RemixSource } from "@/lib/api";
-import type { Project } from "@/lib/contracts";
+import { api, remixApi, useApi, useBusySet } from "@/lib/api";
+import type { Project, RemixEstimate, RemixMode, RemixSource } from "@/lib/contracts";
 import { MODES, STATUS_LABEL, allReady, buildSpec, isWorking, validateSpec, type SpecForm } from "./remix";
 
 /** 二创工作室: external footage (multi-episode) -> new series, or fork one of your own series. */

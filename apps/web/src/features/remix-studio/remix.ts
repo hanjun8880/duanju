@@ -1,4 +1,4 @@
-import type { RemixMode, RemixSource, RemixSpec } from "@/lib/api";
+import type { RemixMode, RemixSource, RemixSpec } from "@/lib/contracts";
 
 export const MODES: { id: RemixMode; label: string; hint: string }[] = [
   { id: "recast", label: "换人物", hint: "每行「原角色=新设定」；留空则全部人物重新设计" },

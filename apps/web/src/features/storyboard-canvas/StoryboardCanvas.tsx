@@ -1,7 +1,7 @@
 "use client";
 import { Fragment, useMemo, useState } from "react";
 import { api, useApi, useBusySet } from "@/lib/api";
-import type { Episode, Job, Model, Project, Shot, Tier } from "@/lib/contracts";
+import type { Episode, Job, Model, Project, Shot, ShotKind, StageRow, Tier } from "@/lib/contracts";
 import { estimateCredits, tierPlan } from "@/lib/estimate";
 import { useWorkbench } from "@/lib/store";
 
@@ -12,19 +12,13 @@ const TIERS: { id: Tier; label: string; note: string }[] = [
   { id: "L3_post", label: "4K", note: "本地" },
 ];
 const TYPE = { character: "人物", prop: "道具", scene: "场景" } as const;
-const KIND = { dialogue: "对白", action: "动作", establishing: "空镜", insert: "插入" } as const;
-type ShotKind = keyof typeof KIND;
-type Take = { job_id: string; render_tier: string | null; model_key: string; final: boolean; url: string; created_at: string };
-// Fields the render team added to the shot list; contracts.ts is regenerated after the merge.
-type ShotX = Shot & {
-  shot_kind?: ShotKind; continuous_from_prev?: boolean; keyframe_url?: string | null;
-  keyframe_status?: string; selected_job_id?: string | null; takes?: Take[];
-};
+const KIND: Record<ShotKind, string> = { dialogue: "对白", action: "动作", establishing: "空镜", insert: "插入" };
 
 export function StoryboardCanvas({ project, onSpent }: { project: Project; onSpent: () => void }) {
   const shots = useApi<Shot[]>(`/projects/${project.id}/shots`, 5000);
   const outlines = useApi<Episode[]>(`/projects/${project.id}/episodes`);
   const models = useApi<Model[]>("/models");
+  const stages = useApi<StageRow[]>("/admin/stages"); // admin routing overrides, so estimates follow the real model
   const { chain, setChain, episode, setEpisode } = useWorkbench();
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const { busy: pending, run } = useBusySet<string>(); // shot ids, plus "all" while a whole-episode render is in flight
@@ -36,7 +30,7 @@ export function StoryboardCanvas({ project, onSpent }: { project: Project; onSpe
   const byKey = useMemo(() => Object.fromEntries((models.data ?? []).map((m) => [m.model_key, m])), [models.data]);
 
   const cost = (tier: Tier, s: Shot) => {
-    const plan = tierPlan(tier, s.duration);
+    const plan = tierPlan(tier, s.duration, { shotKind: s.shot_kind, stages: stages.data ?? undefined });
     const m = byKey[plan.model_key];
     return m ? estimateCredits(m, plan.seconds, plan.resolution) : 0;
   };
@@ -119,8 +113,8 @@ export function StoryboardCanvas({ project, onSpent }: { project: Project; onSpe
           <div className="flex items-stretch">
             {list.map((s, i) => (
               <Fragment key={s.id}>
-                {i > 0 && <Thread on={chain && !!(s as ShotX).continuous_from_prev} passed={!!list[i - 1].last_frame_url} />}
-                <ShotPanel shot={s as ShotX} first={i === 0} cost={cost} onRender={render} onPrompt={savePrompt}
+                {i > 0 && <Thread on={chain && !!s.continuous_from_prev} passed={!!list[i - 1].last_frame_url} />}
+                <ShotPanel shot={s} first={i === 0} cost={cost} onRender={render} onPrompt={savePrompt}
                   onPatch={patch} onSelect={select} busy={pending.has(s.id) || allBusy} />
               </Fragment>
             ))}
@@ -142,7 +136,7 @@ function Thread({ on, passed }: { on: boolean; passed: boolean }) {
 }
 
 function ShotPanel({ shot, first, cost, onRender, onPrompt, onPatch, onSelect, busy }: {
-  shot: ShotX; first: boolean; cost: (t: Tier, s: Shot) => number; onRender: (s: Shot, t: Tier) => void;
+  shot: Shot; first: boolean; cost: (t: Tier, s: Shot) => number; onRender: (s: Shot, t: Tier) => void;
   onPrompt: (s: Shot, p: string) => void; onPatch: (s: Shot, j: Record<string, unknown>) => void;
   onSelect: (s: Shot, jobId: string | null) => void; busy: boolean;
 }) {

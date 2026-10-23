@@ -2,7 +2,8 @@
 import { useState } from "react";
 import { keyframeApi, useApi, useBusySet } from "@/lib/api";
 import { useWorkbench } from "@/lib/store";
-import { type EpisodeEstimate, type KeyframeRow, STATUS_LABEL, budgetUse, canReview, needsKeyframe, usd } from "./money";
+import type { EpisodeEstimate, KeyframeRow } from "@/lib/contracts";
+import { STATUS_LABEL, budgetUse, canReview, needsKeyframe, usd } from "./money";
 
 type Tier = "L1_draft" | "L2_master";
 
