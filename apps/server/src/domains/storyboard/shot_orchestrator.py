@@ -9,13 +9,12 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src import media
+from src.domains.gateway.routing import model_for, video_stage_for
 from src.domains.gateway.schemas import JobCreateRequest, MultimodalRefs
 from src.domains.script.script_engine import EpisodeStoryboardOutput
 from src.models import Asset, Job, LookdevAsset, Shot, Template
 
-DRAFT_MODEL = "seedance_2_5_draft"  # Seedance 2.5 样片模式 (480p), same look as the master
-MASTER_MODEL = "seedance_2_5_spicy"
-MAX_IMAGES = 30
+MAX_IMAGES = 30  # model/resolution per tier and shot kind come from gateway/routing.py
 log = logging.getLogger(__name__)
 TYPE_LABEL = {"character": "人物", "prop": "道具", "scene": "场景"}
 
@@ -111,7 +110,8 @@ def first_frame_for(shot: Shot, prev: Shot | None, chain: bool, tier: str) -> st
     return None
 
 
-async def shot_request(session: AsyncSession, shot_id: uuid.UUID, tier: str, chain: bool = True) -> JobCreateRequest:
+async def shot_request(session: AsyncSession, shot_id: uuid.UUID, tier: str, chain: bool = True,
+                       final: bool = False) -> JobCreateRequest:
     shot = await session.get(Shot, shot_id)
     if shot is None:
         raise LookupError(shot_id)
@@ -131,12 +131,16 @@ async def shot_request(session: AsyncSession, shot_id: uuid.UUID, tier: str, cha
                             "refs": MultimodalRefs(image_urls=images[:MAX_IMAGES], video_urls=refs.get("videos", []),
                                                    audio_urls=refs.get("audios", []))}
     first = first_frame_for(shot, prev, chain, tier)
-    if tier == "L1_draft":  # 480p draft: verify blocking & camera cheaply before paying for 1080p
-        return JobCreateRequest(**base, model_key=DRAFT_MODEL, resolution="480p",
+    if tier == "L1_draft":  # 480p draft: verify blocking & camera cheaply before paying for the master
+        stage = model_for(video_stage_for(shot.shot_kind, draft=True))
+        res: Any = stage.resolution or "480p"  # validated by JobCreateRequest's Literal
+        return JobCreateRequest(**base, model_key=stage.model, resolution=res,
                                 duration=min(max(shot.duration, 4), 30), generate_audio=False, return_last_frame=False,
                                 first_frame_url=first)
-    if tier == "L2_master":
-        return JobCreateRequest(**base, model_key=MASTER_MODEL, resolution="1080p",
+    if tier == "L2_master":  # 720p per shot kind; 1080p only on an explicit final render
+        stage = model_for(video_stage_for(shot.shot_kind, final=final))
+        res = stage.resolution or "720p"
+        return JobCreateRequest(**base, model_key=stage.model, resolution=res,
                                 duration=min(max(shot.duration, 4), 30), return_last_frame=True,
                                 first_frame_url=first)
     raise ValueError(f"{tier} is not a cloud render tier")
@@ -181,7 +185,7 @@ async def next_shot_order(session: AsyncSession, project_id: uuid.UUID, episode:
 
 
 async def render_next(sm: async_sessionmaker[AsyncSession], client: httpx.AsyncClient, shot_id: uuid.UUID, tier: str,
-                      chain: bool) -> uuid.UUID | None:
+                      chain: bool, final: bool = False) -> uuid.UUID | None:
     """Episode batch: after one shot finishes, queue the next (chained L2 must wait for the previous last frame)."""
     from src.domains.gateway import router
     from src.domains.gateway.credit_ledger import LedgerError
@@ -197,14 +201,14 @@ async def render_next(sm: async_sessionmaker[AsyncSession], client: httpx.AsyncC
             return None
         project = await s.get(Project, shot.project_id)
         assert project is not None
-        req = await shot_request(s, nxt.id, tier, chain=chain)
+        req = await shot_request(s, nxt.id, tier, chain=chain, final=final)
         model = await s.get(ModelCatalog, req.model_key)
         assert model is not None
     try:
         check_prompt(req.prompt, project.content_mode, context={"project_id": str(project.id), "shot_id": str(nxt.id)})
         async with sm() as s:
             job = await router.create_job(s, user_id=project.user_id, req=req,
-                                          meta={"render_tier": tier, "chain": chain, "batch": True})
+                                          meta={"render_tier": tier, "chain": chain, "batch": True, "final": final})
     except (ContentBlocked, LedgerError) as e:  # blocked prompt / out of credits: stop the batch quietly
         log.warning("batch stopped at shot %s: %s", nxt.id, e)
         return None

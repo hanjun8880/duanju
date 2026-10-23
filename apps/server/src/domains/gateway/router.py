@@ -216,7 +216,8 @@ async def _after_success(sm: async_sessionmaker[AsyncSession], client: httpx.Asy
         async with sm() as s:
             await orch.on_shot_rendered(s, job.shot_id, p["render_tier"], urls.get("last_frame"), bool(p.get("chain")))
         if p.get("batch"):
-            await orch.render_next(sm, client, job.shot_id, p["render_tier"], bool(p.get("chain")))
+            await orch.render_next(sm, client, job.shot_id, p["render_tier"], bool(p.get("chain")),
+                                   bool(p.get("final")))
 
 
 async def queue_dispatch(sm: async_sessionmaker[AsyncSession], client: httpx.AsyncClient, job: Job,

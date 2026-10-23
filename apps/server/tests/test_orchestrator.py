@@ -56,13 +56,35 @@ async def test_tier_requests(sessionmaker, user_and_project):
         shots = await orch.import_storyboard(s, pid, 1, BOARD)
     async with sessionmaker() as s:
         draft = await orch.shot_request(s, shots[0].id, "L1_draft")
-        master = await orch.shot_request(s, shots[0].id, "L2_master")
+        # 路由改写：1080p 只在显式 final 时使用（gateway/routing.py），旧断言默认 L2 即 1080p。
+        master = await orch.shot_request(s, shots[0].id, "L2_master", final=True)
+        everyday = await orch.shot_request(s, shots[0].id, "L2_master")
     assert (draft.resolution, draft.duration, draft.model_key) == ("480p", 20, "seedance_2_5_draft")
     assert (master.resolution, master.duration, master.model_key) == ("1080p", 20, "seedance_2_5_spicy")
+    assert (everyday.resolution, everyday.model_key) == ("720p", "seedance_2_5_spicy")
     # 审查意见改写：参考图在出片时迟绑定（锁定图最多 3 张，未锁定只取 1 张），顺序 人物→场景→道具→模板。
     # 旧断言是导入时快照的全部 ref_urls（人物→道具→场景，共 6 张）。
     assert master.prompt.startswith("[参考图1: 林晚 人物] [参考图2: 天台 场景] [参考图3: 怀表 道具]")
     assert master.return_last_frame is True and len(master.refs.image_urls) == 3
+
+
+async def test_master_model_routed_by_shot_kind(sessionmaker, user_and_project, monkeypatch):
+    _, pid = user_and_project
+    async with sessionmaker() as s:
+        shots = await orch.import_storyboard(s, pid, 1, BOARD)
+    async with sessionmaker() as s, s.begin():
+        second = await s.get(Shot, shots[1].id)
+        assert second is not None
+        second.shot_kind = "action"
+    async with sessionmaker() as s:
+        action = await orch.shot_request(s, shots[1].id, "L2_master")
+        final = await orch.shot_request(s, shots[1].id, "L2_master", final=True)
+    assert (action.model_key, action.resolution) == ("wan3_spicy", "720p")
+    assert (final.model_key, final.resolution) == ("seedance_2_5_spicy", "1080p")
+    monkeypatch.setenv("MODEL_VIDEO_ACTION", "seedance_2_5_spicy")
+    async with sessionmaker() as s:
+        overridden = await orch.shot_request(s, shots[1].id, "L2_master")
+    assert overridden.model_key == "seedance_2_5_spicy"
 
 
 async def test_refs_bound_late_from_locked_assets(sessionmaker, user_and_project):
@@ -164,7 +186,8 @@ async def test_render_and_callback_propagates_last_frame(engine, sessionmaker, u
         assert second is not None
         second.continuous_from_prev = True
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        r = await c.post(f"/api/v1/shots/{shots[0].id}/render", json={"tier": "L2_master", "chain": True})
+        r = await c.post(f"/api/v1/shots/{shots[0].id}/render",  # final=True: keep the 1080p cost check below
+                         json={"tier": "L2_master", "chain": True, "final": True})
         assert r.status_code == 201, r.text
         job_id = r.json()["id"]
         task_id = json.loads(v.calls[-1].content)  # body sent to vendor
