@@ -349,7 +349,38 @@ MODEL_STORYBOARD=doubao-seed-2-1-lite-260915 PROVIDER_STORYBOARD=doubao`），�
   模型的每百万 token 单价（只有 Victor 给的集/本汇总费用，换算不出准确的 token 单价，没有编造）。
 - qwen 配音、可灵视频、Grok(xai) 文本都是接口占位，没有对应密钥，真实调用全部 NOT_TESTED/BLOCKED。
 - `seed-audio-1.0`（配乐音效）和可灵的打戏视频还没有 model_catalog/stage 挂点。
-- 质量档位（草稿/标准/高质量可选模型）、后台管理页（供应商/模型/价格/用量，带鉴权）是 Victor 这轮追加的两个更大的需求，按约定顺序排在下一步，还没开始。
+- 后台管理页（供应商/模型/价格/用量，带鉴权）是 Victor 这轮追加的需求，按约定顺序排在下一步，还没开始。
 - 提示词盘点：剧本理解/规划/分集/分镜/导入整理/二创改写/二创关键帧识别/定妆出图 都已固定成模板，但没有版本号，
   且分散在 `script/series.py`、`script/api.py`、`remix/modes.py` 三个文件（`DIRECTOR_RULES` 单独在 api.py）。
   统一目录+版本号计划并入后台管理页一起做。
+- Grok(xai) 目前只是 vendor 管线（`VENDOR_BASE_URL`/`VENDOR_API_KEY_ENV` 里有，`XAI_API_KEY` 没配），还没有
+  进任何 `QUALITY_TIERS` 档位或前端入口；"偏海外题材剧本用 Grok" 这个用户可见接入点还没做，排在后台管理页前面。
+
+### 质量档位（草稿/标准/高质量，2026-10-23，接在上面之后）
+
+每模块可选质量档位，复用现有 `routing.py`/成本预估基础设施，不建平行系统：
+
+- `routing.QUALITY_TIERS`：按 stage 配置 draft/high 档（standard 就是 `STAGES` 的默认值，不重复存），只覆盖
+  `model`/`provider`，`price_note` 只给前端展示用，不接入真实计费。覆盖了 summarize/plan/script/storyboard/
+  reformat/remix_vision/remix_rewrite/lookdev_image/keyframe_image/tts 十个 stage；视频 stage 不在这里，因为
+  它们已经有自己的 L0-L3 档位（`video_draft`/`video_dialogue`/.../`video_final`）。
+- `routing.model_for(stage, tier)`：优先级 env(`MODEL_<STAGE>`/`PROVIDER_<STAGE>`) > 后台 `_runtime` 覆盖 >
+  tier 选择 > `STAGES` 默认值——tier 是最低优先级,不会绕过运维已经设置的覆盖。`routing.tiers_for(stage)` 返回
+  包含 standard 的全部档位，给前端下拉框用。
+- 调用链路：`CachedDirectorLLM.structured(..., tier=)` -> `compile_episode_storyboard(..., tier=)` ->
+  `series.two_stage_plan(..., tier=)`（逐段摘要本身不接受 tier，始终用 summarize 的默认档——它是便宜的后台
+  步骤，不面向用户选择）。`lookdev/api.py` 的 `_plan()`/`generate_ref()`/`estimate()` 并行接入，`estimate()`
+  现在用 `model_catalog.usd_per_unit` 返回真实价格和 `model_key`，不再只是 env 占位 flat 价。
+- 项目级默认档位存在 `Project.series_bible_json["_quality_tiers"]`（和既有的 `_cache`/`_progress` 一样的
+  bookkeeping 字段），对 LLM 不可见（`bible_text()` 本来就剔除所有 `_` 前缀键），对前端 API 视图也不可见
+  （`project_view()` 同样剔除）。
+- 新端点：`GET /api/v1/stage-tiers`（全部 stage 的可选档位+价格展示）、
+  `PUT /api/v1/projects/{id}/quality-tiers`（设置项目默认档位，未知 stage 名返回 422）。
+  `PlanRequest`/`StageCallOptions`（script 的 write/storyboard 调用体）都加了可选 `tier` 字段，
+  显式传入优先于项目默认值。
+
+VERIFIED：`test_llm_routing.py::test_model_for_tier_precedence`/`test_tiers_for_includes_standard_and_configured_tiers`
+（tier 覆盖、后台覆盖优先于 tier、env 优先于后台覆盖的三层顺序）；
+`test_series.py::test_stage_tiers_and_project_quality_tiers`（端点契约 + `_quality_tiers` 对 LLM 和前端视图
+都不可见 + 非法 stage 名 422）；`test_lookdev.py::test_generate_dedup_hits_cache_and_estimate`（`estimate()`
+返回真实 `model_key`/价格，`tier="draft"` 切到 seedream_5_flash/0.0167 美元）。ruff / mypy（53 个源文件）通过。

@@ -110,3 +110,42 @@ async def test_openai_compat_without_endpoint_is_blocked(monkeypatch):
 def test_no_hardcoded_model_defaults():
     from src.domains.script import script_engine
     assert not hasattr(script_engine, "DEFAULT_MODEL") and not hasattr(script_engine, "LIGHT_MODEL")
+
+
+def test_model_for_tier_precedence(monkeypatch):
+    """tier picks a QUALITY_TIERS override; admin _runtime override wins over tier; env wins over everything."""
+    from src.domains.gateway import routing
+
+    monkeypatch.setattr(routing, "_runtime", {})
+    base = routing.model_for("script")
+    assert (base.model, base.provider) == ("claude-sonnet-5-5", "anthropic")
+
+    draft = routing.model_for("script", tier="draft")
+    assert (draft.model, draft.provider) == ("doubao-seed-2-1-lite-260915", "doubao")
+
+    assert routing.model_for("script", tier="standard").model == base.model
+
+    routing.set_override("script", model="kimi-k3", provider="moonshot")
+    try:
+        overridden = routing.model_for("script", tier="draft")
+        assert (overridden.model, overridden.provider) == ("kimi-k3", "moonshot")
+
+        monkeypatch.setenv("MODEL_SCRIPT", "glm-5.3")
+        monkeypatch.setenv("PROVIDER_SCRIPT", "zhipu")
+        env_wins = routing.model_for("script", tier="draft")
+        assert (env_wins.model, env_wins.provider) == ("glm-5.3", "zhipu")
+    finally:
+        routing._runtime.pop("script", None)
+
+
+def test_tiers_for_includes_standard_and_configured_tiers():
+    from src.domains.gateway import routing
+
+    tiers = routing.tiers_for("script")
+    assert tiers["standard"]["model"] == "claude-sonnet-5-5"
+    assert tiers["draft"]["model"] == "doubao-seed-2-1-lite-260915"
+    assert tiers["high"]["model"] == "kimi-k3"
+
+    assert routing.tiers_for("video_final") == {
+        "standard": {"model": "seedance_2_5_spicy", "provider": "ark", "price_note": "仅显式 final"}
+    }

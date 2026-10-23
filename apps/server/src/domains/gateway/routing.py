@@ -50,12 +50,61 @@ STAGES: dict[str, StageModel] = {s.stage: s for s in [
     StageModel("tts", "tts", "volc_tts_default", "volc_tts", note="角色配音"),
 ]}
 
+# 质量档位：每个支持选档的 stage 有 draft/standard/high 三档。standard 就是上面 STAGES 的默认值（不用重复写）；
+# draft/high 用专家选型表里更便宜/更贵的模型覆盖 model+provider。视频已经有自己的档位系统（L0-L3 对应
+# video_draft/video_dialogue/.../video_final 四个 stage），不在这里重复。价格是 Victor 核实的口头参考价，
+# 没有接官方价目 API，只用来给前端展示，不参与真实计费（真实计费仍按 settings.llm_prices / model_catalog）。
+QUALITY_TIERS: dict[str, dict[str, dict[str, str]]] = {
+    "summarize": {
+        "draft": {"model": "deepseek-chat", "provider": "deepseek", "price_note": "DeepSeek 空闲时段，更便宜"},
+        "high": {"model": "qwen3.7-flash", "provider": "qwen", "price_note": "qwen3.7-flash"},
+    },
+    "plan": {
+        "draft": {"model": "glm-5.3", "provider": "zhipu", "price_note": "~3.4 元/本"},
+        "high": {"model": "kimi-k3", "provider": "moonshot", "price_note": "质量上限，比 GLM-5.3 贵"},
+    },
+    "script": {
+        "draft": {"model": "doubao-seed-2-1-lite-260915", "provider": "doubao", "price_note": "~0.02 元/集"},
+        "high": {"model": "kimi-k3", "provider": "moonshot", "price_note": "~0.3 元/集，盲测与 Claude 并列第一"},
+    },
+    "storyboard": {
+        "draft": {"model": "doubao-seed-2-1-lite-260915", "provider": "doubao", "price_note": "~0.02 元/集"},
+        "high": {"model": "claude-opus-5-5", "provider": "anthropic", "price_note": "顶级模型"},
+    },
+    "reformat": {
+        "draft": {"model": "doubao-seed-2-1-lite-260915", "provider": "doubao", "price_note": "~0.02 元/集"},
+    },
+    "remix_vision": {
+        "draft": {"model": "doubao-seed-2-1-lite-260915", "provider": "doubao", "price_note": "~0.02 元/集，直接读视频"},
+    },
+    "remix_rewrite": {
+        "draft": {"model": "kimi-k3", "provider": "moonshot", "price_note": "~0.3 元/集"},
+    },
+    "lookdev_image": {
+        "draft": {"model": "seedream_5_flash", "provider": "ark", "price_note": "0.12 元/张"},
+        "standard": {"model": "seedream_5_pro", "provider": "ark", "price_note": "0.30 元/张"},
+    },
+    "keyframe_image": {
+        "draft": {"model": "seedream_5_flash", "provider": "ark", "price_note": "0.12 元/张"},
+        "high": {"model": "seedream_5_pro", "provider": "ark", "price_note": "0.30 元/张"},
+    },
+    "tts": {
+        "draft": {"model": "qwen_audio_tts", "provider": "qwen_tts", "price_note": "~2.8 元/万字，虚构角色复刻免费"},
+        "high": {"model": "volc_tts_default", "provider": "volc_tts", "price_note": "音色固定，复刻另计费"},
+    },
+}
+
 _runtime: dict[str, dict[str, str]] = {}  # admin overrides (ledger team persists these)
 
 
-def model_for(stage: str) -> StageModel:
+def model_for(stage: str, tier: str | None = None) -> StageModel:
     base = STAGES[stage]
-    over = dict(_runtime.get(stage, {}))
+    over: dict[str, str] = {}
+    if tier and tier != "standard":
+        tier_cfg = QUALITY_TIERS.get(stage, {}).get(tier)
+        if tier_cfg:
+            over |= {k: v for k, v in tier_cfg.items() if k in ("model", "provider")}
+    over |= _runtime.get(stage, {})  # admin override always wins over a tier choice
     env = os.environ.get(f"MODEL_{stage.upper()}")
     if env:
         over["model"] = env
@@ -63,6 +112,14 @@ def model_for(stage: str) -> StageModel:
     if env_p:
         over["provider"] = env_p
     return replace(base, **over) if over else base
+
+
+def tiers_for(stage: str) -> dict[str, dict[str, str]]:
+    """Every selectable tier for a stage, standard included, for the frontend's quality dropdown."""
+    base = STAGES[stage]
+    out = {"standard": {"model": base.model, "provider": base.provider, "price_note": base.note}}
+    out |= QUALITY_TIERS.get(stage, {})
+    return out
 
 
 def video_stage_for(shot_kind: str, final: bool = False, draft: bool = False) -> str:

@@ -232,7 +232,7 @@ class CachedDirectorLLM:
     async def structured(self, out: type[T], system_rules: str, series_bible: dict[str, Any],
                          prompt: str | list[dict[str, Any]], content_mode: str = "standard_sfw",
                          effort: Effort = "medium", model: str | None = None, max_tokens: int = 32000,
-                         stage: str = "storyboard") -> T:
+                         stage: str = "storyboard", tier: str | None = None) -> T:
         if content_mode == "uncensored_nsfw":
             if self.uncensored is None:
                 raise RuntimeError("uncensored_nsfw needs a private LLM: set UNCENSORED_LLM_BASE_URL")
@@ -241,7 +241,7 @@ class CachedDirectorLLM:
             res = await self.uncensored.structured(out, system_rules, series_bible, prompt)
             self._record(stage, self.uncensored.model, "uncensored", self.uncensored.last_usage)
             return res
-        routed = model_for(stage)
+        routed = model_for(stage, tier)
         use_model = model or self.model or routed.model
         if routed.provider != "anthropic":
             compat = self.compat or OpenAICompatLLM.from_env() if routed.provider == "openai_compat" \
@@ -280,7 +280,8 @@ class CachedDirectorLLM:
 
     async def compile_episode_storyboard(
         self, system_rules: str, series_bible_json: dict[str, Any], episode_raw_text: str,
-        content_mode: str = "standard_sfw", effort: Effort = "medium",
+        content_mode: str = "standard_sfw", effort: Effort = "medium", tier: str | None = None,
     ) -> EpisodeStoryboardOutput:
         return await self.structured(EpisodeStoryboardOutput, system_rules, series_bible_json,
-                                     user_prompt(episode_raw_text), content_mode, effort, stage="storyboard")
+                                     user_prompt(episode_raw_text), content_mode, effort, stage="storyboard",
+                                     tier=tier)
