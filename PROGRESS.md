@@ -117,3 +117,25 @@
 - 网页正文抓取是启发式（按块级标签长度过滤导航/按钮文案），非完整 readability 算法；复杂排版页面可能需要手动贴正文兜底。
 - 「按原文整理成剧本」需要 ANTHROPIC_API_KEY；未配置时明确报错，不是静默失败。
 - 原片拆解用的 faster-whisper 模型较大时，在资源受限环境可能被系统杀进程；生产环境需要给 worker 预留足够内存。
+
+## 专家团 · 关键帧/账本组（分支 team/ledger）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 0007_ledger：`model_catalog.usd_per_unit` 参考价（Seedance 2.5 $0.231/s、样片 $0.092/s、Wan 3 $0.083/s、MiniMax H3 $0.08/s、Seedream $0.03/张，本地 0）；新表 `stage_overrides` | PASS | `test_ledger_money.py::test_migration_seeds_usd_reference_prices_and_stage_table` |
+| 美元估算：`usd_per_unit × 单位 × 分辨率系数`（`settings.usd_resolution_factors`，Seedance 1080p=0.569/0.231，Wan 1080p=0.165/0.083）；无美元价的模型回落到 积分 × `credit_usd`(0.01)；每个 job 记 `usd_estimate`、`stage` | PASS | `test_estimate_usd_*`、`test_job_carries_usd_and_stage` |
+| 预算闸门（在 ledger 预扣事务里、锁住用户行后检查，无竞态）：项目 / 集 `budget_usd`、每日 `DAILY_BUDGET_USD`；已结算 + 进行中 + 本次 > 预算即拒绝，HTTP 402 中文提示；退款的不计 | PASS | `test_project_budget_*`、`test_episode_budget_and_daily_cap` |
+| 内容哈希缓存：`sha256(model_key + 排序 JSON(task_type+canonical))`，同项目命中成功且产物仍在磁盘 → 0 费用 success job，`request_payload.cached_from`，复制资产行并触发后续钩子；`force=true` 跳过；产物丢失不命中；dispatch_job 对非 queued job 直接返回（不会重复付费） | PASS | `test_content_hash_cache_*`、`test_cache_skipped_when_output_file_is_gone`、`test_api_force_flag_and_cached_view` |
+| 关键帧工位：`POST /shots/{id}/keyframe`（`model_for("keyframe_image")`，每个绑定资产取 `locked_ref_urls[:3]`，没锁定取 `ref_urls[:1]`），`POST /projects/{pid}/episodes/{n}/keyframes`（只补缺失/被驳回），`GET` 同路径（网格，失败的 pending 自动回 none），`approve`/`reject`；成功回调写 `shots.keyframe_url/keyframe_status=ready` | PASS | `test_keyframes.py` 4 项（假 Ark 传输层） |
+| `GET /projects/{pid}/episodes/{n}/estimate?tier=&final=`（按 routing 分工，积分+美元，含关键帧张数与费用）、`GET /projects/{pid}/costs`（按环节/按集美元）、`PUT /projects/{pid}/budget`、`PUT .../episodes/{n}/budget` | PASS | `test_episode_estimate_follows_stage_routing`、`test_project_costs_by_stage_and_budget_endpoints` |
+| `GET/PUT /api/v1/admin/stages`：持久化到 `stage_overrides`，启动时 `load_stage_overrides` → `routing.set_override`；model 为空即恢复默认 | PASS | `test_admin_stages_persist_and_reload` |
+| 前端：账本抽屉加「花费」（美元按环节/按集、项目预算）、「模型分工」页签、模型美元单价列、任务美元/缓存标记；新 `features/keyframe-review`（关键帧网格 + 整集美元估算） | PASS（tsc + vitest） / NOT_TESTED（未真机截图，KeyframeReview 尚未挂到页面） | `money.test.ts` 3 项 |
+| 真实 Seedream 关键帧出图 | BLOCKED | 无 ARK_API_KEY |
+
+后端 127 passed（新增 15 项）；`ruff`、`mypy`、`pnpm tsc`、`pnpm test:run`（9）通过。美元价格为第三方参考价，未经官方核实。
+
+### 已知限制 / 接口约定
+- 缓存会让「同参数重抽」直接返回旧结果：重抽必须传 `force`（`submit(..., force=True)` 或 `meta={"force": True}`）。分镜渲染接口 `RenderRequest` 还没有 force 字段（不在本组范围）。
+- 编排器 `render_next` 走 `router.create_job` + `queue_dispatch`，若命中缓存，job 已是 success，dispatch 会直接返回但不会触发 `_after_success`，批量链会停在该镜。
+- 关键帧通过后不改 `first_frame_url`（避免清空参考）；由渲染组决定 `keyframe_status == "approved"` 时如何用 `keyframe_url`。
+- 估算按 routing 的未来行为（按镜头类型/720p，final 才 1080p）；当前编排器 L2 仍固定 Seedance 1080p，渲染组改完后两者一致。
