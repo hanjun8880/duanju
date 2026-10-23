@@ -172,7 +172,7 @@ def remix(project_id: str, video_path: str) -> int:
     The result becomes the project's source text, so remix follows the same plan -> script -> storyboard path."""
     import os
 
-    from src.domains.script import series
+    from src.domains.script import series, usage
     from src.domains.script.script_engine import CachedDirectorLLM, KeyframeNotes
     from src.domains.script.video_remix import LocalVideoDeconstructor
     from src.models import Project
@@ -198,6 +198,7 @@ def remix(project_id: str, video_path: str) -> int:
                 res = await llm.structured(KeyframeNotes, series.KEYFRAME_RULES, {}, series.keyframe_content(batch),
                                            effort="low", max_tokens=16000, stage="remix_vision")
                 notes |= {n.shot_order: n.description for n in res.shots}
+            await usage.record_llm_calls(project_id, llm.calls, sm)
         async with sm() as s, s.begin():
             p = await s.get(Project, uuid.UUID(project_id), with_for_update=True)
             assert p is not None

@@ -1,8 +1,9 @@
 import asyncio
+import contextlib
 import os
 import shutil
 import uuid
-from collections.abc import Awaitable
+from collections.abc import AsyncIterator, Awaitable
 from pathlib import Path
 from typing import Any, Literal
 
@@ -13,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
 from src.deps import Http, Session, director
-from src.domains.script import series, source_import
+from src.domains.script import series, source_import, usage
 from src.domains.script.script_engine import (
     CachedDirectorLLM,
     EpisodeScript,
@@ -108,10 +109,26 @@ async def compile_storyboard(project_id: uuid.UUID, body: CompileRequest, sessio
     mode, bible = p.content_mode, p.series_bible_json
     await _replaceable_shots(session, project_id, body.episode_number)
     await session.close()
-    board = await _llm(CachedDirectorLLM().compile_episode_storyboard(DIRECTOR_RULES, bible, body.text,
-                                                                      content_mode=mode))
+    async with _ledgered(project_id) as llm:
+        board = await _llm(llm.compile_episode_storyboard(DIRECTOR_RULES, bible, body.text, content_mode=mode))
     shots = await orch.import_storyboard(session, project_id, body.episode_number, board)
     return {"created": len(shots), "episode_title": board.episode_title, "hook_summary": board.hook_summary}
+
+
+@contextlib.asynccontextmanager
+async def _ledgered(project_id: uuid.UUID) -> AsyncIterator[CachedDirectorLLM]:
+    """One LLM client per request; every call it made (even refused/truncated ones) becomes a jobs row."""
+    llm = CachedDirectorLLM()
+    try:
+        yield llm
+    finally:
+        await usage.record_llm_calls(project_id, llm.calls)
+
+
+@api.get("/projects/{project_id}/llm-usage")
+async def llm_usage(project_id: uuid.UUID, session: Session) -> dict[str, Any]:
+    """LLM spend for this project, from the llm.* job rows (USD is an estimate from settings.llm_prices)."""
+    return await usage.project_spend(session, project_id)
 
 
 def _need_llm(p: Project) -> None:
@@ -255,9 +272,10 @@ async def plan_series(project_id: uuid.UUID, body: PlanRequest, session: Session
     _need_llm(p)
     mode = p.content_mode
     await session.close()
-    plan: SeriesPlan = await _llm(CachedDirectorLLM().structured(
-        SeriesPlan, series.PLAN_RULES, {}, series.plan_prompt(segments, body.episode_count, body.direction),
-        mode, effort="high", stage="plan"))
+    async with _ledgered(project_id) as llm:
+        plan: SeriesPlan = await _llm(llm.structured(
+            SeriesPlan, series.PLAN_RULES, {}, series.plan_prompt(segments, body.episode_count, body.direction),
+            mode, effort="high", stage="plan"))
     async with session.begin():
         p = await session.get(Project, project_id, with_for_update=True)
         assert p is not None
@@ -311,10 +329,11 @@ async def import_script(project_id: uuid.UUID, body: ImportScriptRequest, sessio
         mode = p.content_mode
         await session.close()
         reformatted: list[str] = []
-        for seg in segments:
-            out: EpisodeScript = await _llm(CachedDirectorLLM().structured(
-                EpisodeScript, series.REFORMAT_RULES, {}, seg, mode, stage="reformat"))
-            reformatted.append(out.script_text)
+        async with _ledgered(project_id) as llm:
+            for seg in segments:
+                out: EpisodeScript = await _llm(llm.structured(
+                    EpisodeScript, series.REFORMAT_RULES, {}, seg, mode, stage="reformat"))
+                reformatted.append(out.script_text)
         segments = reformatted
     else:
         await session.close()
@@ -366,8 +385,9 @@ async def write_script(project_id: uuid.UUID, n: int, session: Session) -> dict[
     prompt = series.script_prompt(episode_view(e), segments, prev)
     mode, bible = p.content_mode, p.series_bible_json
     await session.close()
-    out: EpisodeScript = await _llm(CachedDirectorLLM().structured(EpisodeScript, series.SCRIPT_RULES, bible,
-                                                                    prompt, mode, stage="script"))
+    async with _ledgered(project_id) as llm:
+        out: EpisodeScript = await _llm(llm.structured(EpisodeScript, series.SCRIPT_RULES, bible, prompt, mode,
+                                                       stage="script"))
     async with session.begin():
         e = await _episode(session, project_id, n)
         e.script_text, e.status = out.script_text, "scripted"
@@ -387,7 +407,8 @@ async def storyboard_episode(project_id: uuid.UUID, n: int, session: Session) ->
     mode, bible = p.content_mode, p.series_bible_json
     await _replaceable_shots(session, project_id, n)
     await session.close()
-    board = await _llm(CachedDirectorLLM().compile_episode_storyboard(DIRECTOR_RULES, bible, text, content_mode=mode))
+    async with _ledgered(project_id) as llm:
+        board = await _llm(llm.compile_episode_storyboard(DIRECTOR_RULES, bible, text, content_mode=mode))
     shots = await orch.import_storyboard(session, project_id, n, board)
     async with session.begin():
         (await _episode(session, project_id, n)).status = "storyboarded"

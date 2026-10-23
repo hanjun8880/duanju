@@ -113,3 +113,7 @@ async def test_remix_video_becomes_source_text(engine, sessionmaker, user_and_pr
     req = seen[0]
     assert req["model"] == "claude-sonnet-5-5"
     assert sum(1 for b in req["messages"][0]["content"] if b["type"] == "image") == 3
+    async with sessionmaker() as s:
+        llm_jobs = (await s.execute(select(Job.task_type, Job.request_payload).where(Job.project_id == pid))).all()
+    assert [j.task_type for j in llm_jobs] == ["llm.remix_vision"]  # keyframe description is ledgered too
+    assert llm_jobs[0].request_payload["model"] == "claude-sonnet-5-5"
