@@ -82,6 +82,20 @@ async def test_admin_model_switch_price_and_manual_refund(sessionmaker, user_and
     assert [x["reason"] for x in ledger_rows][:2] == ["cancel_refund", "pre_deduct"]
 
 
+async def test_admin_providers_lists_key_status_never_the_key(monkeypatch):
+    monkeypatch.setenv("ARK_API_KEY", "secret-ark-key")
+    monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
+    async with client() as c:
+        rows = (await c.get("/api/v1/admin/providers")).json()
+        models = (await c.get("/api/v1/admin/models")).json()
+    by_name = {r["provider"]: r for r in rows}
+    assert by_name["ark"]["key_configured"] is True
+    assert by_name["zhipu"]["key_configured"] is False
+    assert "text" in by_name["zhipu"]["kinds"]
+    assert "secret-ark-key" not in str(rows)  # never echo the key itself
+    assert models and "provider" in models[0] and "api_base" not in models[0]
+
+
 async def test_lookdev_patch_consent_only_for_newly_added_character_refs(engine, user_and_project):
     from sqlalchemy import text
     _, pid = user_and_project

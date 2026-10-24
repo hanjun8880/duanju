@@ -350,7 +350,9 @@ MODEL_STORYBOARD=doubao-seed-2-1-lite-260915 PROVIDER_STORYBOARD=doubao`），�
   模型的每百万 token 单价（只有 Victor 给的集/本汇总费用，换算不出准确的 token 单价，没有编造）。
 - qwen 配音、可灵视频、Grok(xai) 文本都是接口占位，没有对应密钥，真实调用全部 NOT_TESTED/BLOCKED。
 - `seed-audio-1.0`（配乐音效）和可灵的打戏视频还没有 model_catalog/stage 挂点。
-- 后台管理页（供应商/模型/价格/用量，带鉴权）是 Victor 这轮追加的需求，按约定顺序排在下一步，还没开始。
+- 后台管理页（供应商/模型/价格/用量）其实已经在 hark/base 里做好了（`apps/web/src/features/admin-ledger/AdminLedger.tsx`
+  + `gateway/api.py` 的 `/admin/models`、`/admin/stages`、`/admin/jobs`、`/ledger`、`/projects/{id}/costs`），
+  不是没开始，只是这轮之前没发现。鉴权用的是已有的 `APP_TOKEN` bearer（`lib/api.ts` 的 `withAuth`），不是新建的。
 - 提示词盘点：剧本理解/规划/分集/分镜/导入整理/二创改写/二创关键帧识别/定妆出图 都已固定成模板，但没有版本号，
   且分散在 `script/series.py`、`script/api.py`、`remix/modes.py` 三个文件（`DIRECTOR_RULES` 单独在 api.py）。
   统一目录+版本号计划并入后台管理页一起做。
@@ -392,3 +394,16 @@ VERIFIED：`test_llm_routing.py::test_model_for_tier_precedence`/`test_tiers_for
 Victor 的"偏海外剧情用 Grok"。`PlanRequest.tier`/`StageCallOptions.tier` 的 Literal 加了 `"overseas"`。
 价格未核实（没有 Grok 官方价目核对，没有配 `XAI_API_KEY`），标记 NOT_TESTED。
 VERIFIED（路由逻辑，非真实调用）：`test_llm_routing.py::test_overseas_tier_routes_script_to_grok`。
+
+### 后台管理页补的一块：供应商密钥状态（2026-10-24）
+
+后台管理页本来就有"账本与模型"（模型价格/启用/降级、按环节分工、任务重试/退回、积分流水），这轮只补了一个它没有
+的视图——"供应商"：新增 `GET /api/v1/admin/providers`，汇总三处分散的密钥检查（`gateway/adapters` 的
+`HttpAdapter.env_prefix`/`ArkAdapter`、`script_engine.VENDOR_API_KEY_ENV`、`voice/providers.CREDENTIAL_ENV`），
+给每个供应商一行：用途（文本/图片视频/配音）、密钥环境变量名、是否已配置——**从不返回密钥本身**。
+`model_view` 顺带加了 `provider` 字段（安全，非密钥），但只在 `/admin/models` 暴露；公开的 `GET /models`
+仍然不带 provider，加了这个字段后原有的 `test_models_endpoint_hides_provider_details` 立刻报错，改成
+显式剔除 provider 后恢复通过，没有改测试的断言本身。
+VERIFIED：`test_workbench_api.py::test_admin_providers_lists_key_status_never_the_key`（配置了 ARK_API_KEY
+时正确标"已配置"，没配 ZHIPU_API_KEY 时标"未配置"，密钥字符串从不出现在响应里）；前端 `pnpm tsc --noEmit`/
+`pnpm lint`/`pnpm test:run`（24 passed）都过；后端全量 265 passed，ruff/mypy 干净。

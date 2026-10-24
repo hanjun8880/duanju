@@ -1,12 +1,13 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { api, putBudget, putStage, useApi } from "@/lib/api";
-import type { Job, LedgerRow, Model, ProjectCosts, StageRow } from "@/lib/contracts";
+import type { Job, LedgerRow, Model, ProjectCosts, ProviderRow, StageRow } from "@/lib/contracts";
 import { useWorkbench } from "@/lib/store";
 import { PHASE_LABEL, STAGE_LABEL, budgetUse, usd } from "@/features/keyframe-review/money";
 
-type View = "ledger" | "stages" | "costs";
-const VIEWS: { id: View; label: string }[] = [{ id: "costs", label: "花费" }, { id: "stages", label: "模型分工" }, { id: "ledger", label: "账本与模型" }];
+type View = "ledger" | "stages" | "providers" | "costs";
+const VIEWS: { id: View; label: string }[] = [{ id: "costs", label: "花费" }, { id: "stages", label: "模型分工" }, { id: "providers", label: "供应商" }, { id: "ledger", label: "账本与模型" }];
+const KIND_LABEL: Record<string, string> = { text: "文本", "image/video": "图片/视频", tts: "配音" };
 
 const REASON: Record<string, string> = {
   pre_deduct: "预扣", settle_refund: "结算退回", settle_extra_charge: "结算补扣", provider_5xx_refund: "供应商故障退回",
@@ -22,6 +23,7 @@ export function AdminLedger({ onClose }: { onClose: () => void }) {
   const jobs = useApi<Job[]>("/admin/jobs?limit=30");
   const ledger = useApi<LedgerRow[]>("/ledger?limit=30");
   const stages = useApi<StageRow[]>("/admin/stages");
+  const providers = useApi<ProviderRow[]>("/admin/providers");
   const { projectId } = useWorkbench();
   const costs = useApi<ProjectCosts>(projectId ? `/projects/${projectId}/costs` : null);
   const [view, setView] = useState<View>("costs");
@@ -116,6 +118,22 @@ export function AdminLedger({ onClose }: { onClose: () => void }) {
                   </tr>
                 );
               })}
+            </tbody>
+          </table>
+        )}
+
+        {view === "providers" && (
+          <table className="mb-8 w-full text-sm">
+            <thead><tr className="text-left text-ink-soft"><th className="py-1 font-normal">供应商</th><th className="font-normal">用途</th><th className="font-normal">密钥环境变量</th><th className="font-normal">状态</th></tr></thead>
+            <tbody>
+              {providers.data?.map((p) => (
+                <tr key={p.provider} className="border-t border-celadon">
+                  <td className="py-1.5">{p.provider}</td>
+                  <td className="text-ink-soft">{p.kinds.map((k) => KIND_LABEL[k] ?? k).join(" / ")}</td>
+                  <td className="text-ink-soft">{p.key_envs.join(", ") || "—"}</td>
+                  <td className={p.key_configured ? "text-dawn" : "text-seal"}>{p.key_configured ? "已配置" : "未配置"}</td>
+                </tr>
+              ))}
             </tbody>
           </table>
         )}

@@ -1,4 +1,5 @@
 import logging
+import os
 import uuid
 from decimal import Decimal
 from typing import Annotated, Any, Literal
@@ -25,8 +26,9 @@ api = APIRouter(prefix="/api/v1")
 
 
 def model_view(m: ModelCatalog) -> dict[str, Any]:
-    # Only abstract model codes reach the frontend: no provider, api_base or keys.
+    # provider name is shown (useful for the admin page); api_base/keys never are.
     return {"model_key": m.model_key, "display_name": m.display_name, "task_type": m.task_type,
+            "provider": m.provider,
             "is_nsfw": m.is_nsfw, "is_active": m.is_active, "credits_per_unit": str(m.credits_per_unit),
             "max_duration": m.max_duration, "max_refs": m.max_refs, "fallback_model_key": m.fallback_model_key,
             "resolution_multipliers": m.resolution_multipliers, "health_score": str(m.health_score),
@@ -48,7 +50,7 @@ def job_view(j: Job) -> dict[str, Any]:
 async def list_models(session: Session) -> list[dict[str, Any]]:
     rows = (await session.execute(
         select(ModelCatalog).where(ModelCatalog.is_active).order_by(ModelCatalog.model_key))).scalars()
-    return [model_view(m) for m in rows]
+    return [{k: v for k, v in model_view(m).items() if k != "provider"} for m in rows]
 
 
 def _task_fits_model(task: str, model_task: str) -> bool:
@@ -170,6 +172,40 @@ async def patch_model(model_key: str, patch: ModelPatch, session: Session) -> di
     await session.commit()
     await session.refresh(m)
     return model_view(m)
+
+
+def _vendor_rows() -> list[dict[str, Any]]:
+    """Which vendor API keys are configured, never the keys themselves. Pulled from the three places
+    credentials are checked: gateway adapters (HttpAdapter env_prefix + ArkAdapter's own), the text-vendor
+    table in script_engine, and voice/providers.py's TTS credentials."""
+    from src.domains.gateway.adapters import ADAPTERS
+    from src.domains.gateway.adapters.ark import ArkAdapter
+    from src.domains.script.script_engine import VENDOR_API_KEY_ENV
+    from src.domains.voice.providers import CREDENTIAL_ENV
+
+    rows: dict[str, dict[str, Any]] = {}
+
+    def add(provider: str, kind: str, key_envs: tuple[str, ...]) -> None:
+        row = rows.setdefault(provider, {"provider": provider, "kinds": [], "key_envs": list(key_envs),
+                                         "key_configured": bool(key_envs) and all(os.environ.get(k) for k in key_envs)})
+        if kind not in row["kinds"]:
+            row["kinds"].append(kind)
+
+    add("anthropic", "text", ("ANTHROPIC_API_KEY",))
+    for name, adapter in ADAPTERS.items():
+        key_envs = ("ARK_API_KEY",) if isinstance(adapter, ArkAdapter) else (f"{name.upper()}_API_KEY",)
+        add(name, "image/video", key_envs)
+    for provider, env in VENDOR_API_KEY_ENV.items():
+        add(provider, "text", (env,))
+    for provider, envs in CREDENTIAL_ENV.items():
+        if provider != "local":
+            add(provider, "tts", envs)
+    return sorted(rows.values(), key=lambda r: str(r["provider"]))
+
+
+@api.get("/admin/providers")
+async def admin_providers() -> list[dict[str, Any]]:
+    return _vendor_rows()
 
 
 @api.get("/admin/jobs")

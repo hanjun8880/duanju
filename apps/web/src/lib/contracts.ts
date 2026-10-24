@@ -49,7 +49,8 @@ export interface SeriesBible { title?: string; logline?: string; characters?: Bi
 export interface Project { id: string; title: string; category: string; content_mode: ContentMode; aspect_ratio: string; status: string; has_source_text: boolean; series_bible_json: SeriesBible; created_at: string }
 export interface Episode { episode_number: number; title: string; synopsis: string; source_segments: number[]; script_text: string | null; status: string }
 export interface Output { id: string; kind: "episode" | "series"; url: string; meta: { episode_number?: number | null; shots_used?: number; shots_total?: number; episodes?: number[] }; created_at: string }
-export interface Model { model_key: string; display_name: string; task_type: string; is_nsfw: boolean; is_active: boolean; credits_per_unit: string; max_duration: number; max_refs: number; fallback_model_key: string | null; resolution_multipliers: Record<string, number>; health_score: string; usd_per_unit: string | null; usd_resolution_factors: Record<string, number> }
+export interface Model { model_key: string; display_name: string; task_type: string; provider: string; is_nsfw: boolean; is_active: boolean; credits_per_unit: string; max_duration: number; max_refs: number; fallback_model_key: string | null; resolution_multipliers: Record<string, number>; health_score: string; usd_per_unit: string | null; usd_resolution_factors: Record<string, number> }
+export interface ProviderRow { provider: string; kinds: string[]; key_envs: string[]; key_configured: boolean }
 export interface BoundAsset { id: string; name: string; type: "character" | "prop" | "scene"; range: [number, number] }
 export type ShotKind = "dialogue" | "action" | "establishing" | "insert";
 export type KeyframeStatus = "none" | "pending" | "ready" | "approved" | "rejected";
