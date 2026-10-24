@@ -1,0 +1,38 @@
+[
+  {
+    "viewport": {
+      "width": 1440,
+      "height": 900
+    },
+    "loadingGeometryStable": true,
+    "consoleErrors": 0,
+    "pageErrors": 0,
+    "rootAndControlsHaveDimensions": true,
+    "horizontalOverflow": false,
+    "savedEconomyTiers": true,
+    "isolatedForceRegeneration": true,
+    "doubleSubmitPrevented": true,
+    "errorRetryAndEmptyStates": true,
+    "thousandEpisodes": true,
+    "reducedMotion": true,
+    "expectedResourceErrorsDuringFaultInjection": 2
+  },
+  {
+    "viewport": {
+      "width": 390,
+      "height": 844
+    },
+    "loadingGeometryStable": true,
+    "consoleErrors": 0,
+    "pageErrors": 0,
+    "rootAndControlsHaveDimensions": true,
+    "horizontalOverflow": false,
+    "savedEconomyTiers": true,
+    "isolatedForceRegeneration": true,
+    "doubleSubmitPrevented": true,
+    "errorRetryAndEmptyStates": true,
+    "thousandEpisodes": true,
+    "reducedMotion": true,
+    "expectedResourceErrorsDuringFaultInjection": 2
+  }
+]

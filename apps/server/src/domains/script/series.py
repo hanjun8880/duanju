@@ -181,11 +181,12 @@ Progress = Callable[[dict[str, Any]], Awaitable[None]]
 
 async def two_stage_plan(llm: CachedDirectorLLM, segments: list[str], episode_count: int | None,
                          direction: str | None, content_mode: str, cache: dict[str, Any],
-                         progress: Progress, tier: str | None = None) -> SeriesPlan:
+                         progress: Progress, tier: str | None = None,
+                         summarize_tier: str | None = None) -> SeriesPlan:
     """summarize (cached per segment sha256, <=3 concurrent) -> plan the bible -> outline <=20 episodes a call.
     `cache` is updated in place (pruned to these segments); `progress` is awaited after every step.
-    `tier` picks a quality tier for the "plan" stage (routing.QUALITY_TIERS); summarize always uses its own
-    stage's default since it is the cheap, non-user-facing step."""
+    `tier` picks the plan model; `summarize_tier` independently selects the reading model.
+    Existing segment digests remain reusable when changing tiers."""
     hashes = [seg_hash(s) for s in segments]
     todo = [i for i, h in enumerate(hashes, 1) if h not in cache]
     total = len(segments)
@@ -198,7 +199,7 @@ async def two_stage_plan(llm: CachedDirectorLLM, segments: list[str], episode_co
         async with sem:
             res = await llm.structured(DigestBatch, SUMMARIZE_RULES, {},
                                        digest_prompt([(i, segments[i - 1]) for i in batch]), content_mode,
-                                       effort="low", max_tokens=8000, stage="summarize")
+                                       effort="low", max_tokens=8000, stage="summarize", tier=summarize_tier)
         got = {d.segment: d for d in res.digests}
         async with lock:
             for i in batch:

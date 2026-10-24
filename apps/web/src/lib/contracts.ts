@@ -106,6 +106,13 @@ export type LlmUsage = {
   by_stage: Record<string, { calls: number; usd: number; input_tokens: number; output_tokens: number; unpriced_calls: number }>;
 };
 
+export interface QualityTierOption {
+  model: string; provider: string; price_note: string;
+  effective_model: string; effective_provider: string;
+}
+export type StageTiers = Record<string, Record<string, QualityTierOption>>;
+export interface ProjectQualityTiers { tiers: Record<string, string> }
+
 // remix studio (/remix/*)
 export type RemixMode = "recast" | "restyle" | "replot" | "sequel" | "spinoff" | "condense";
 export interface RemixSpec {

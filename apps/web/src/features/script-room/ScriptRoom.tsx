@@ -1,9 +1,10 @@
 "use client";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { api, useApi } from "@/lib/api";
 import type { Episode, Project } from "@/lib/contracts";
 import { useWorkbench } from "@/lib/store";
 import { type LlmUsage, type PlanProgress, progressText, usageText } from "./progress";
+import { QualityControls } from "./QualityControls";
 
 const STATUS: Record<string, string> = { outlined: "大纲", scripted: "已成剧本", storyboarded: "已拆分镜" };
 const EPISODE_SECONDS = 90;
@@ -16,6 +17,9 @@ export function ScriptRoom({ project, onChanged }: { project: Project; onChanged
   const [direction, setDirection] = useState("");
   const [mode, setMode] = useState<"generate" | "import">("generate");
   const [busy, setBusy] = useState<string | null>(null);
+  const [qualityBlocked, setQualityBlocked] = useState(true);
+  const actionLock = useRef(false);
+  const generationBlocked = !!busy || qualityBlocked;
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [planning, setPlanning] = useState(false);
   const progress = useApi<PlanProgress>(planning ? `/projects/${project.id}/plan/progress` : null, 2000);
@@ -25,9 +29,11 @@ export function ScriptRoom({ project, onChanged }: { project: Project; onChanged
   const current = list.find((e) => e.episode_number === episode) ?? list[0];
 
   const run = async (label: string, fn: () => Promise<string>) => {
+    if (actionLock.current || qualityBlocked) return;
+    actionLock.current = true;
     setBusy(label); setMsg(null);
     try { setMsg({ ok: true, text: await fn() }); } catch (e) { setMsg({ ok: false, text: (e as Error).message }); }
-    setBusy(null); episodes.reload(); spend.reload(); onChanged();
+    finally { actionLock.current = false; setBusy(null); episodes.reload(); spend.reload(); onChanged(); }
   };
   const plan = () => run("正在通读素材、锁定人物与分集…", async () => {
     if (list.length && !confirm("重新规划会替换现有的分集大纲和剧本（已有分镜不受影响）。继续吗？")) return "已取消";
@@ -69,8 +75,10 @@ export function ScriptRoom({ project, onChanged }: { project: Project; onChanged
             <p className="mt-2 text-sm text-ink-soft">人物：{bible.characters.map((c) => `${c.name}（${c.role_tag}）`).join("，")}</p>
           )}
         </div>
-        {list.length > 0 && <button className="btn" disabled={!!busy} onClick={writeAll}>一键写完全部剧本并拆分镜</button>}
+        {list.length > 0 && <button type="button" className="btn" disabled={generationBlocked} aria-busy={!!busy} onClick={writeAll}>一键写完全部剧本并拆分镜</button>}
       </section>
+
+      <QualityControls projectId={project.id} disabled={!!busy} onBlockedChange={setQualityBlocked} />
 
       <section className="space-y-4" aria-label="生成或导入剧本">
         <div className="flex gap-2" role="group" aria-label="剧本来源">
@@ -94,9 +102,9 @@ export function ScriptRoom({ project, onChanged }: { project: Project; onChanged
                 ))}
               </div>
             </div>
-            <button className={`btn ${list.length ? "btn-quiet" : ""}`} disabled={!project.has_source_text || !!busy} onClick={plan}>{list.length ? "重新规划全剧" : "生成剧集圣经与分集大纲"}</button>
+            <button type="button" className={`btn ${list.length ? "btn-quiet" : ""}`} disabled={!project.has_source_text || generationBlocked} aria-busy={!!busy} onClick={plan}>{list.length ? "重新规划全剧" : "生成剧集圣经与分集大纲"}</button>
           </div>
-        ) : <ImportScript project={project} busy={!!busy} hasExisting={list.length > 0} onDone={(m) => { setMsg(m); episodes.reload(); setEpisode(1); onChanged(); }} />}
+        ) : <ImportScript project={project} busy={generationBlocked} hasExisting={list.length > 0} onDone={(m) => { setMsg(m); episodes.reload(); setEpisode(1); onChanged(); }} />}
       </section>
 
       {busy && <p className="text-dawn" role="status">{busy} 长篇需要几分钟，请不要关闭页面。</p>}
@@ -118,7 +126,7 @@ export function ScriptRoom({ project, onChanged }: { project: Project; onChanged
               </li>
             ))}
           </ol>
-          <EpisodeDesk key={`${current.episode_number}-${current.script_text?.length ?? 0}`} ep={current} busy={!!busy}
+          <EpisodeDesk key={`${current.episode_number}-${current.script_text?.length ?? 0}`} ep={current} busy={generationBlocked}
             onPatch={(json) => patch(current.episode_number, json)}
             onScript={() => run(`正在写第 ${current.episode_number} 集剧本…`, async () => { await script(current.episode_number); return `第 ${current.episode_number} 集剧本已写好，可以直接修改。`; })}
             onBoard={() => run(`正在拆第 ${current.episode_number} 集分镜…`, async () => {

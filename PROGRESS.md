@@ -407,3 +407,16 @@ VERIFIED（路由逻辑，非真实调用）：`test_llm_routing.py::test_overse
 VERIFIED：`test_workbench_api.py::test_admin_providers_lists_key_status_never_the_key`（配置了 ARK_API_KEY
 时正确标"已配置"，没配 ZHIPU_API_KEY 时标"未配置"，密钥字符串从不出现在响应里）；前端 `pnpm tsc --noEmit`/
 `pnpm lint`/`pnpm test:run`（24 passed）都过；后端全量 265 passed，ruff/mypy 干净。
+
+## 2026-10-24 — 岗位成本设置与明确的单镜头重生成（Codex）
+
+基于 `claude/hark-model-routing` / `f1b0515`，分支 `codex/workbench-cost-controls`。
+
+- PASS：剧本页五个岗位档位选择、经济档快捷设置、保存／恢复、实际部署覆盖显示；新增 GET 项目档位与 PUT 值校验。
+- PASS：规划成功保留 `_quality_tiers`；素材摘要、整理格式、直接拆镜透传岗位档位；检查密钥时按实际路由供应商判断。
+- PASS：修复 OpenAI-compatible 地址多拼 `/v1`；原测试对智谱错误地址的断言同步纠正，新增独立 URL 回归覆盖。
+- PASS：分镜页区分缓存复用与付费重出；重出仅对本镜发送 `force=true`，同步防双击锁；编辑镜头描述保存中避免同时提交。
+- PASS：后端 ruff、mypy（53 files）、pytest（272 passed）；前端 tsc、eslint（0 errors，4 个原有 warnings）、vitest（24 passed）、production build。
+- VERIFIED（固定 API 测试数据）：Playwright 1440×900 / 390×844，成功路径 console.error=0 / pageerror=0，无横向溢出，非零 DOM 尺寸；骨架占位尺寸稳定、1000 集、长模型名、失败重试、键盘与 reduced motion；见 `docs/cost-controls-runtime.json`。
+- NOT_TESTED：本轮未调用真实付费供应商；实际妆效、实际节省比例和供应商账户可用性未声称验证。未部署或合并。本次自评 96/100，不代替外部审核。
+- 操作说明、费用原理和复现命令：`docs/COST_CONTROLS.md`。

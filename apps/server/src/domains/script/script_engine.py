@@ -11,6 +11,7 @@ uncensored_nsfw -> a private OpenAI-compatible endpoint (vLLM / llama.cpp / Olla
 import json
 import os
 from typing import Any, Literal, TypeVar
+from urllib.parse import urlsplit
 
 import httpx
 from anthropic import AsyncAnthropic, transform_schema
@@ -190,7 +191,10 @@ class OpenAICompatLLM:
             "response_format": {"type": "json_schema", "json_schema": {
                 "name": out.__name__, "schema": out.model_json_schema()}}}
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
-        r = await self.client.post(f"{self.base_url}/v1/chat/completions", json=body, headers=headers)
+        # Named vendors already include their API prefix (/v1, /api/v3, /api/paas/v4).
+        # Preserve root-only URLs used by existing self-hosted OpenAI-compatible deployments.
+        prefix = self.base_url if urlsplit(self.base_url).path else f"{self.base_url}/v1"
+        r = await self.client.post(f"{prefix}/chat/completions", json=body, headers=headers)
         r.raise_for_status()
         data = r.json()
         u = data.get("usage") or {}
