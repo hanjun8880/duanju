@@ -15,7 +15,7 @@ from src.domains.gateway.routing import model_for
 from src.domains.voice.providers import Voice, configured, synthesize
 
 ROUTING_PROVIDER = {"volc_tts": "volc", "volc": "volc", "minimax_tts": "minimax", "minimax": "minimax",
-                    "local": "local"}
+                    "qwen_tts": "qwen", "qwen": "qwen", "local": "local"}
 _SPEAKER = re.compile(r"^\s*(?:[（(][^）)]{1,12}[）)]|[^：:\s“\"「]{1,12}\s*[：:])\s*")
 _QUOTES = "“”\"「」『』‘’'"
 

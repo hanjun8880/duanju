@@ -56,6 +56,30 @@ async def test_render_lands_in_candidates_not_locked(sessionmaker, user_and_proj
     assert b.locked_ref_urls == ["/media/renders/old.png"]  # the lock is untouched
 
 
+async def test_pure_t2i_ref_expires_and_is_dropped_from_refs_for_episode(sessionmaker, user_and_project):
+    """Seedance refuses real-photo references, so a pure-text-to-image Seedream still is only trusted for
+    lookdev.api.REF_VALID_DAYS; refs_for_episode must stop handing out an expired one."""
+    from datetime import UTC, datetime, timedelta
+
+    _, pid = user_and_project
+    a = await make_asset(sessionmaker, pid, ref_urls=[], locked_ref_urls=[])
+    async with sessionmaker() as s:
+        await on_lookdev_rendered(s, a.id, "/media/renders/fresh.png", pure_t2i=True)
+        await on_lookdev_rendered(s, a.id, "/media/renders/stale.png", pure_t2i=True)
+    b = await load(sessionmaker, a.id)
+    assert b.meta["ref_meta"]["/media/renders/fresh.png"]["pure_t2i"] is True
+    async with sessionmaker() as s, s.begin():
+        asset = await s.get(LookdevAsset, a.id, with_for_update=True)
+        asset.locked_ref_urls = [asset.ref_urls[1], asset.ref_urls[0]]  # lock both: stale first, fresh second
+        asset.meta = {**asset.meta, "ref_meta": {
+            **asset.meta["ref_meta"],
+            "/media/renders/stale.png": {"pure_t2i": True,
+                                         "expires_at": (datetime.now(UTC) - timedelta(days=1)).isoformat()}}}
+    b = await load(sessionmaker, a.id)
+    async with sessionmaker() as s:
+        assert await refs_for_episode(s, b, 1) == ["/media/renders/fresh.png"]
+
+
 async def test_candidates_capped_at_12_and_locked_survive_trim(sessionmaker, user_and_project):
     _, pid = user_and_project
     refs = [f"/media/renders/{i}.png" for i in range(12)]
@@ -164,14 +188,16 @@ async def test_generate_with_lock_sends_locked_refs(engine, sessionmaker, user_a
     assert "四宫格" in body["prompt"] and len(body["image"]) == 2
 
 
-async def test_generate_dedup_hits_cache_and_estimate(engine, sessionmaker, user_and_project, ark, monkeypatch):
+async def test_generate_dedup_hits_cache_and_estimate(engine, sessionmaker, user_and_project, ark):
     uid, pid = user_and_project
     await ark_ready(engine, uid)
     fake = ark
     a = await make_asset(sessionmaker, pid)
     async with client() as c:
         est = (await c.get(f"/api/v1/lookdev/{a.id}/estimate", params={"kind": "portrait"})).json()
-        assert est == {"kind": "portrait", "images": 1, "usd": 0.03, "cached": False}
+        # usd now follows the routed model's real model_catalog price (seedream_5_pro), not the flat env guess
+        assert est == {"kind": "portrait", "images": 1, "model_key": "seedream_5_pro", "usd": 0.0417,
+                       "cached": False}
         r1 = await c.post(f"/api/v1/lookdev/{a.id}/generate", json={"kind": "portrait"})
         r2 = await c.post(f"/api/v1/lookdev/{a.id}/generate")  # default kind = portrait, same prompt+refs
         assert r1.status_code == 201 and r2.status_code == 200, r2.text
@@ -181,9 +207,10 @@ async def test_generate_dedup_hits_cache_and_estimate(engine, sessionmaker, user
         assert est["usd"] == 0 and est["cached"] is True
         r3 = await c.post(f"/api/v1/lookdev/{a.id}/generate", json={"kind": "portrait", "force": True})
         assert r3.status_code == 201 and len(fake.bodies("/images/generations")) == 2
-        monkeypatch.setenv("LOOKDEV_USD_PER_IMAGE", "0.05")
-        est = (await c.get(f"/api/v1/lookdev/{a.id}/estimate", params={"kind": "turnaround"})).json()
-        assert est["usd"] == 0.05
+        # draft tier routes to the cheaper seedream_5_flash and shows its own real price
+        est = (await c.get(f"/api/v1/lookdev/{a.id}/estimate",
+                           params={"kind": "turnaround", "tier": "draft"})).json()
+        assert est["model_key"] == "seedream_5_flash" and est["usd"] == 0.0167
         r = await c.get(f"/api/v1/lookdev/{a.id}/estimate", params={"kind": "costume"})
         assert r.status_code == 422  # costume needs a note
 

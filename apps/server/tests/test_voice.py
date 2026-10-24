@@ -151,7 +151,7 @@ async def test_voice_api_preview_and_character_voice(creds, mp3_bytes, user_and_
             assert r.json()["provider"] == "minimax" and r.json()["url"].startswith("/media/tts/")
             assert json.loads(seen[0].content)["text"] == "你好"
             provs = (await c.get("/api/v1/voice/providers")).json()
-            assert {p["id"] for p in provs} == {"volc", "minimax", "local"}
+            assert {p["id"] for p in provs} == {"volc", "minimax", "qwen", "local"}
             assert (await c.put(f"/api/v1/voice/characters/{uuid.uuid4()}",
                                 json={"provider": "local", "voice_id": "cmn"})).status_code == 404
     finally:

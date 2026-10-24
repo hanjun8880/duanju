@@ -1,4 +1,5 @@
-"""TTS adapters: Volcengine (火山) V1 HTTP, MiniMax t2a_v2, and local espeak-ng (silence if espeak is absent).
+"""TTS adapters: Volcengine (火山) V1 HTTP, MiniMax t2a_v2, DashScope qwen-audio TTS, and local espeak-ng
+(silence if espeak is absent).
 
 Endpoints / field names come from the vendors' public docs as summarized 2026-10 and were NOT exercised with a
 real key: every value marked UNVERIFIED lives in CONFIG and can be overridden by env without code changes.
@@ -31,10 +32,18 @@ CONFIG: dict[str, dict[str, Any]] = {
         "audio_setting": {"sample_rate": 32000, "bitrate": 128000, "format": "mp3", "channel": 1},  # UNVERIFIED
         "default_voice": os.environ.get("MINIMAX_TTS_DEFAULT_VOICE", "female-shaonv"),  # UNVERIFIED voice id
     },
+    "qwen": {
+        # DashScope (阿里云百炼) qwen-audio-3.1-tts-plus: 专家选型里成本最低且支持虚构角色免费复刻音色的配音模型。
+        "url": os.environ.get("QWEN_TTS_URL",
+                              "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"),
+        "model": os.environ.get("QWEN_TTS_MODEL", "qwen-audio-3.1-tts-plus"),  # UNVERIFIED model id
+        "default_voice": os.environ.get("QWEN_TTS_DEFAULT_VOICE", "zhiyan"),  # UNVERIFIED voice id
+    },
     "local": {"default_voice": os.environ.get("ESPEAK_VOICE", "cmn"), "wpm": 175,
               "silence_chars_per_s": 4.0},
 }
-CREDENTIAL_ENV = {"volc": ("VOLC_TTS_APPID", "VOLC_TTS_TOKEN"), "minimax": ("MINIMAX_API_KEY",), "local": ()}
+CREDENTIAL_ENV = {"volc": ("VOLC_TTS_APPID", "VOLC_TTS_TOKEN"), "minimax": ("MINIMAX_API_KEY",),
+                  "qwen": ("QWEN_API_KEY",), "local": ()}
 
 
 class TTSError(RuntimeError):
@@ -102,6 +111,20 @@ async def _minimax(client: httpx.AsyncClient, text: str, v: Voice) -> Audio:
     return Audio(bytes.fromhex(audio_hex), "." + cfg["audio_setting"]["format"])
 
 
+async def _qwen(client: httpx.AsyncClient, text: str, v: Voice) -> Audio:
+    cfg = CONFIG["qwen"]
+    body = {"model": cfg["model"], "input": {"text": text, "voice": v.voice_id or cfg["default_voice"]},
+            "parameters": {"speech_rate": v.speed}}
+    r = await client.post(cfg["url"], json=body, timeout=60,
+                          headers={"Authorization": f"Bearer {os.environ['QWEN_API_KEY']}"})
+    data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+    audio_url = ((data.get("output") or {}).get("audio") or {}).get("url")
+    if r.status_code != 200 or not audio_url:
+        raise TTSError(f"qwen tts {r.status_code} {data.get('message', r.text[:200])}")
+    audio = await client.get(audio_url, timeout=60)
+    return Audio(audio.content, ".mp3")
+
+
 def silence_wav(seconds: float, rate: int = 16000) -> bytes:
     with tempfile.NamedTemporaryFile(suffix=".wav") as f:
         with wave.open(f.name, "wb") as w:
@@ -129,6 +152,8 @@ async def synthesize(client: httpx.AsyncClient, text: str, v: Voice) -> Audio:
         return await _volc(client, text, v)
     if v.provider == "minimax":
         return await _minimax(client, text, v)
+    if v.provider == "qwen":
+        return await _qwen(client, text, v)
     if v.provider == "local":
         return await asyncio.to_thread(_local_sync, text, v)
     raise TTSError(f"unknown tts provider {v.provider}")

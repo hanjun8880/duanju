@@ -5,9 +5,9 @@ import shutil
 import uuid
 from collections.abc import AsyncIterator, Awaitable
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, HTTPException, UploadFile
+from fastapi import APIRouter, Body, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -137,6 +137,38 @@ def _need_llm(p: Project) -> None:
         raise HTTPException(503, "ANTHROPIC_API_KEY not configured on the server")
 
 
+def _tier(p: Project, stage: str, explicit: str | None) -> str | None:
+    """A per-call tier wins; otherwise the project's saved default for that stage (routing.QUALITY_TIERS)."""
+    if explicit:
+        return explicit
+    return ((p.series_bible_json or {}).get("_quality_tiers") or {}).get(stage)
+
+
+@api.get("/stage-tiers")
+async def stage_tiers() -> dict[str, dict[str, dict[str, str]]]:
+    """Every stage that offers a draft/standard/high choice, for the frontend's quality dropdowns."""
+    from src.domains.gateway import routing
+    return {s: routing.tiers_for(s) for s in routing.QUALITY_TIERS}
+
+
+class QualityTiers(BaseModel):
+    tiers: dict[str, str] = Field(default_factory=dict, description="stage -> draft|standard|high")
+
+
+@api.put("/projects/{project_id}/quality-tiers")
+async def set_quality_tiers(project_id: uuid.UUID, body: QualityTiers, session: Session) -> dict[str, Any]:
+    from src.domains.gateway import routing
+    bad = [s for s in body.tiers if s not in routing.STAGES]
+    if bad:
+        raise HTTPException(422, f"unknown stage: {bad[0]}")
+    p = await session.get(Project, project_id)
+    if p is None:
+        raise HTTPException(404, "project not found")
+    p.series_bible_json = {**(p.series_bible_json or {}), "_quality_tiers": body.tiers}
+    await session.commit()
+    return {"tiers": body.tiers}
+
+
 async def _llm[T](call: Awaitable[T]) -> T:
     try:
         return await call
@@ -254,6 +286,8 @@ class PlanRequest(BaseModel):
     episode_count: int | None = Field(default=None, ge=1, le=200)
     direction: str | None = Field(default=None, max_length=500, description="创作方向：类型、剧情偏好等，可选")
     replace: bool = False
+    tier: Literal["draft", "standard", "high", "overseas"] | None = Field(
+        default=None, description="本次规划用的质量档位；overseas=Grok，偏海外题材；不填则用项目保存的默认档位")
 
 
 @api.post("/projects/{project_id}/plan", status_code=201)
@@ -275,7 +309,7 @@ async def plan_series(project_id: uuid.UUID, body: PlanRequest, session: Session
     if existing and not body.replace:
         raise HTTPException(409, "episodes already planned; pass replace=true to re-plan")
     _need_llm(p)
-    mode = p.content_mode
+    mode, tier = p.content_mode, _tier(p, "plan", body.tier)
     cache: dict[str, Any] = dict((p.series_bible_json or {}).get("_cache") or {})
     await session.close()
 
@@ -286,13 +320,13 @@ async def plan_series(project_id: uuid.UUID, body: PlanRequest, session: Session
         try:
             if series.needs_two_stage(segments):
                 plan = await _llm(series.two_stage_plan(llm, segments, body.episode_count, body.direction, mode,
-                                                        cache, progress))
+                                                        cache, progress, tier=tier))
             else:
                 await progress({"stage": "plan", "done": 0, "total": 1})
                 plan = await _llm(llm.structured(
                     SeriesPlan, series.PLAN_RULES, {},
                     series.plan_prompt(segments, body.episode_count, body.direction), mode, effort="high",
-                    stage="plan"))
+                    stage="plan", tier=tier))
         except HTTPException as e:
             await progress({"stage": "error", "error": str(e.detail)[:500]})
             raise
@@ -417,8 +451,14 @@ async def patch_episode(project_id: uuid.UUID, n: int, body: EpisodePatch, sessi
     return episode_view(e)
 
 
+class StageCallOptions(BaseModel):
+    tier: Literal["draft", "standard", "high", "overseas"] | None = Field(
+        default=None, description="本次调用用的质量档位；overseas=Grok，偏海外题材；不填则用项目保存的默认档位")
+
+
 @api.post("/projects/{project_id}/episodes/{n}/script", status_code=201)
-async def write_script(project_id: uuid.UUID, n: int, session: Session) -> dict[str, Any]:
+async def write_script(project_id: uuid.UUID, n: int, session: Session,
+                       body: Annotated[StageCallOptions | None, Body()] = None) -> dict[str, Any]:
     p = await session.get(Project, project_id)
     if p is None:
         raise HTTPException(404, "project not found")
@@ -428,11 +468,11 @@ async def write_script(project_id: uuid.UUID, n: int, session: Session) -> dict[
     _need_llm(p)
     segments = series.split_source(p.source_novel_text or "")
     prompt = series.script_prompt(episode_view(e), segments, prev)
-    mode, bible = p.content_mode, p.series_bible_json
+    mode, bible, tier = p.content_mode, p.series_bible_json, _tier(p, "script", body.tier if body else None)
     await session.close()
     async with _ledgered(project_id) as llm:
         out: EpisodeScript = await _llm(llm.structured(EpisodeScript, series.SCRIPT_RULES, bible, prompt, mode,
-                                                       stage="script"))
+                                                       stage="script", tier=tier))
     async with session.begin():
         e = await _episode(session, project_id, n)
         e.script_text, e.status = out.script_text, "scripted"
@@ -441,7 +481,8 @@ async def write_script(project_id: uuid.UUID, n: int, session: Session) -> dict[
 
 
 @api.post("/projects/{project_id}/episodes/{n}/storyboard", status_code=201)
-async def storyboard_episode(project_id: uuid.UUID, n: int, session: Session) -> dict[str, Any]:
+async def storyboard_episode(project_id: uuid.UUID, n: int, session: Session,
+                             body: Annotated[StageCallOptions | None, Body()] = None) -> dict[str, Any]:
     """Screenplay (or the outline if no screenplay yet) -> shots bound to the look-dev references."""
     p = await session.get(Project, project_id)
     if p is None:
@@ -450,10 +491,12 @@ async def storyboard_episode(project_id: uuid.UUID, n: int, session: Session) ->
     _need_llm(p)
     text = e.script_text or f"第{n}集《{e.title}》大纲：{e.synopsis}"
     mode, bible = p.content_mode, p.series_bible_json
+    tier = _tier(p, "storyboard", body.tier if body else None)
     await _replaceable_shots(session, project_id, n)
     await session.close()
     async with _ledgered(project_id) as llm:
-        board = await _llm(llm.compile_episode_storyboard(DIRECTOR_RULES, bible, text, content_mode=mode))
+        board = await _llm(llm.compile_episode_storyboard(DIRECTOR_RULES, bible, text, content_mode=mode,
+                                                           tier=tier))
     shots = await orch.import_storyboard(session, project_id, n, board)
     async with session.begin():
         (await _episode(session, project_id, n)).status = "storyboarded"

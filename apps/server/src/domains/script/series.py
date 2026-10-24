@@ -181,9 +181,11 @@ Progress = Callable[[dict[str, Any]], Awaitable[None]]
 
 async def two_stage_plan(llm: CachedDirectorLLM, segments: list[str], episode_count: int | None,
                          direction: str | None, content_mode: str, cache: dict[str, Any],
-                         progress: Progress) -> SeriesPlan:
+                         progress: Progress, tier: str | None = None) -> SeriesPlan:
     """summarize (cached per segment sha256, <=3 concurrent) -> plan the bible -> outline <=20 episodes a call.
-    `cache` is updated in place (pruned to these segments); `progress` is awaited after every step."""
+    `cache` is updated in place (pruned to these segments); `progress` is awaited after every step.
+    `tier` picks a quality tier for the "plan" stage (routing.QUALITY_TIERS); summarize always uses its own
+    stage's default since it is the cheap, non-user-facing step."""
     hashes = [seg_hash(s) for s in segments]
     todo = [i for i, h in enumerate(hashes, 1) if h not in cache]
     total = len(segments)
@@ -215,7 +217,7 @@ async def two_stage_plan(llm: CachedDirectorLLM, segments: list[str], episode_co
     await progress({"stage": "plan", "done": 0, "total": 1})
     setting: SeriesSetting = await llm.structured(SeriesSetting, SETTING_RULES, {},
                                                   setting_prompt(digests, episode_count, direction),
-                                                  content_mode, effort="high", stage="plan")
+                                                  content_mode, effort="high", stage="plan", tier=tier)
     n = max(1, min(200, episode_count or setting.episode_count))
     bible = bible_from_plan(setting)
     rules = f"{OUTLINE_RULES}\n\n全书片段摘要：\n{digests}"  # byte-stable across batches -> cached prefix
@@ -225,7 +227,7 @@ async def two_stage_plan(llm: CachedDirectorLLM, segments: list[str], episode_co
         await progress({"stage": "outline", "done": len(episodes), "total": n})
         out: EpisodeOutlines = await llm.structured(EpisodeOutlines, rules, bible,
                                                     outline_prompt(start, end, n, total, episodes, direction),
-                                                    content_mode, effort="medium", stage="plan")
+                                                    content_mode, effort="medium", stage="plan", tier=tier)
         batch = sorted(out.episodes, key=lambda o: o.episode_number)[:end - start + 1]
         episodes += [o.model_copy(update={"episode_number": len(episodes) + 1 + k}) for k, o in enumerate(batch)]
     return SeriesPlan(title=setting.title, logline=setting.logline, characters=setting.characters,

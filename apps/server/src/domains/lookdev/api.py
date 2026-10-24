@@ -12,7 +12,7 @@ from src.deps import Http, Session
 from src.domains.gateway.routing import model_for
 from src.domains.gateway.schemas import JobCreateRequest, MultimodalRefs
 from src.domains.lookdev.refs import MAX_LOCKED, refs_for_episode
-from src.models import Job, LookdevAsset, Project, Template
+from src.models import Job, LookdevAsset, ModelCatalog, Project, Template
 
 MAX_CANDIDATES = 12  # ref_urls = reviewable candidates; only locked_ref_urls / meta.looks[].locked feed shots
 GEN_CACHE_SIZE = 50
@@ -43,7 +43,8 @@ class LookdevCreate(BaseModel):
 def asset_view(a: LookdevAsset) -> dict[str, Any]:
     return {"id": str(a.id), "asset_type": a.asset_type, "name": a.name, "role_tag": a.role_tag,
             "visual_prompt": a.visual_prompt, "ref_urls": a.ref_urls, "locked_ref_urls": a.locked_ref_urls,
-            "meta": {k: v for k, v in a.meta.items() if k != "gen_cache"}}
+            "meta": {k: v for k, v in a.meta.items() if k not in ("gen_cache", "ref_meta")},
+            "ref_meta": a.meta.get("ref_meta") or {}}
 
 
 async def get_asset(session: AsyncSession, asset_id: uuid.UUID, lock: bool = False) -> LookdevAsset:
@@ -185,6 +186,13 @@ class GenerateBody(BaseModel):
     kind: Kind = "portrait"
     note: str | None = Field(default=None, max_length=500)  # extra direction; required for costume
     force: bool = False  # skip the dedup cache (deliberate re-roll)
+    tier: Literal["draft", "standard", "high"] | None = Field(
+        default=None, description="本次出图用的质量档位；不填则用项目保存的默认档位")
+
+
+def _tier(p: Project, stage: str, explicit: str | None) -> str | None:
+    """A per-call tier wins; otherwise the project's saved default for that stage (routing.QUALITY_TIERS)."""
+    return explicit or ((p.series_bible_json or {}).get("_quality_tiers") or {}).get(stage)
 
 
 def build_prompt(a: LookdevAsset, aspect: str, kind: str, note: str | None) -> str:
@@ -219,14 +227,15 @@ def usd_per_image() -> float:
     return float(os.environ.get("LOOKDEV_USD_PER_IMAGE", DEFAULT_USD_PER_IMAGE))
 
 
-async def _plan(session: AsyncSession, a: LookdevAsset, kind: str, note: str | None) -> tuple[str, str, list[str]]:
+async def _plan(session: AsyncSession, a: LookdevAsset, kind: str, note: str | None,
+                tier: str | None = None) -> tuple[str, str, list[str]]:
     if a.asset_type not in KIND_TYPES[kind]:
         raise HTTPException(422, f"{kind} is not available for {a.asset_type}")
     if kind == "costume" and not (note and note.strip()):
         raise HTTPException(422, "costume needs a note describing the outfit")
     p = await session.get(Project, a.project_id)
     assert p is not None
-    model = model_for("lookdev_image").model
+    model = model_for("lookdev_image", _tier(p, "lookdev_image", tier)).model
     refs = gen_refs(a)
     return model, build_prompt(a, p.aspect_ratio, kind, note), refs
 
@@ -247,7 +256,7 @@ async def generate_ref(asset_id: uuid.UUID, session: Session, bg: BackgroundTask
     from src.domains.gateway.api import job_view, submit
     b = body or GenerateBody()
     a = await get_asset(session, asset_id)
-    model, prompt, refs = await _plan(session, a, b.kind, b.note)
+    model, prompt, refs = await _plan(session, a, b.kind, b.note, b.tier)
     key = gen_key(model, prompt, refs)
     if not b.force and (hit := await _cached_job(session, a, key)) is not None:
         response.status_code = 200
@@ -267,17 +276,27 @@ async def generate_ref(asset_id: uuid.UUID, session: Session, bg: BackgroundTask
 
 @api.get("/lookdev/{asset_id}/estimate")
 async def estimate(asset_id: uuid.UUID, session: Session, kind: Kind = "portrait",
-                   note: str | None = None) -> dict[str, Any]:
-    """Zero-token cost preview: every kind is exactly one image call; a dedup hit costs nothing."""
+                   note: str | None = None, tier: Literal["draft", "standard", "high"] | None = None) -> dict[str, Any]:
+    """Zero-token cost preview: every kind is exactly one image call; a dedup hit costs nothing.
+    usd follows the tier's actual model price (model_catalog.usd_per_unit) when known, else the flat
+    env-configured placeholder, so switching tiers in the UI shows its real price difference."""
     a = await get_asset(session, asset_id)
-    model, prompt, refs = await _plan(session, a, kind, note)
+    model, prompt, refs = await _plan(session, a, kind, note, tier)
     cached = await _cached_job(session, a, gen_key(model, prompt, refs)) is not None
-    return {"kind": kind, "images": 1, "usd": 0 if cached else round(usd_per_image(), 4), "cached": cached}
+    catalog = await session.get(ModelCatalog, model)
+    usd = float(catalog.usd_per_unit) if catalog and catalog.usd_per_unit is not None else usd_per_image()
+    return {"kind": kind, "images": 1, "model_key": model, "usd": 0 if cached else round(usd, 4), "cached": cached}
 
 
-async def on_lookdev_rendered(session: AsyncSession, asset_id: uuid.UUID, url: str) -> None:
+REF_VALID_DAYS = 30  # Seedance 拒收真人照片当参考图；纯文生图（无参考）的脸只在方舟账号内这么多天内保证可用
+
+
+async def on_lookdev_rendered(session: AsyncSession, asset_id: uuid.UUID, url: str, *, pure_t2i: bool = False) -> None:
     """A finished render is a *candidate*: newest first, ≤12, never auto-locked. Trimming drops the oldest
-    candidates that no lock (asset or per-episode look) points at."""
+    candidates that no lock (asset or per-episode look) points at.
+    pure_t2i: generated with zero image references (Seedream text-only), so lookdev/refs.py can expire it after
+    REF_VALID_DAYS instead of letting a stale face keep getting bound to new Seedance video jobs."""
+    from datetime import UTC, datetime, timedelta
     async with session.begin():
         a = await session.get(LookdevAsset, asset_id, with_for_update=True)
         if a is None:
@@ -291,6 +310,11 @@ async def on_lookdev_rendered(session: AsyncSession, asset_id: uuid.UUID, url: s
             if refs[i] not in pinned:
                 del refs[i]
         a.ref_urls = refs[:MAX_CANDIDATES] if len(refs) > MAX_CANDIDATES else refs
+        ref_meta = dict(a.meta.get("ref_meta") or {})
+        ref_meta[url] = {"pure_t2i": pure_t2i,
+                         "expires_at": (datetime.now(UTC) + timedelta(days=REF_VALID_DAYS)).isoformat()
+                         if pure_t2i else None}
+        a.meta = {**a.meta, "ref_meta": {u: m for u, m in ref_meta.items() if u in a.ref_urls}}
 
 
 @api.get("/projects/{project_id}/lookdev")

@@ -1,6 +1,7 @@
 """Novel/idea -> plan -> script -> storyboard through the real API, real Postgres and the real Anthropic SDK.
 Only Claude's HTTP transport is stubbed; the stub answers by which structured-output schema was requested."""
 import json
+import uuid
 
 import httpx2
 import pytest
@@ -112,3 +113,27 @@ async def test_plan_needs_source_and_key(engine, monkeypatch):
         await c.patch(f"/api/v1/projects/{pid}", json={"source_novel_text": "一个想法"})
         r = await c.post(f"/api/v1/projects/{pid}/plan", json={})
         assert r.status_code == 503 and "ANTHROPIC_API_KEY" in r.text
+
+
+async def test_stage_tiers_and_project_quality_tiers(engine):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        tiers = (await c.get("/api/v1/stage-tiers")).json()
+        assert tiers["script"]["standard"]["model"] == "claude-sonnet-5-5"
+        assert tiers["script"]["draft"]["model"] == "doubao-seed-2-1-lite-260915"
+        assert "video_final" not in tiers  # video stages have their own L0-L3 tiers, not QUALITY_TIERS
+
+        pid = (await c.post("/api/v1/projects", json={"title": "x", "source_novel_text": "一个创意"})).json()["id"]
+        r = await c.put(f"/api/v1/projects/{pid}/quality-tiers", json={"tiers": {"script": "draft"}})
+        assert r.status_code == 200 and r.json()["tiers"] == {"script": "draft"}
+        project = (await c.get(f"/api/v1/projects/{pid}")).json()
+        assert "_quality_tiers" not in project["series_bible_json"]  # bookkeeping keys hidden from the API view
+
+        from sqlalchemy.ext.asyncio import AsyncSession
+        async with AsyncSession(engine) as s:
+            row = await s.get(script_api.Project, uuid.UUID(pid))
+            assert row.series_bible_json["_quality_tiers"] == {"script": "draft"}
+        from src.domains.script.script_engine import bible_text
+        assert "_quality_tiers" not in bible_text(row.series_bible_json)
+
+        bad = await c.put(f"/api/v1/projects/{pid}/quality-tiers", json={"tiers": {"not_a_stage": "draft"}})
+        assert bad.status_code == 422
