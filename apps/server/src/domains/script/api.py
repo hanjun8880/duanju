@@ -108,10 +108,12 @@ async def compile_storyboard(project_id: uuid.UUID, body: CompileRequest, sessio
         raise HTTPException(404, "project not found")
     _need_llm(p)
     mode, bible = p.content_mode, p.series_bible_json
+    tier = _tier(p, "storyboard", None)
     await _replaceable_shots(session, project_id, body.episode_number)
     await session.close()
     async with _ledgered(project_id) as llm:
-        board = await _llm(llm.compile_episode_storyboard(DIRECTOR_RULES, bible, body.text, content_mode=mode))
+        board = await _llm(llm.compile_episode_storyboard(DIRECTOR_RULES, bible, body.text,
+                                                         content_mode=mode, tier=tier))
     shots = await orch.import_storyboard(session, project_id, body.episode_number, board)
     return {"created": len(shots), "episode_title": board.episode_title, "hook_summary": board.hook_summary}
 
@@ -132,8 +134,10 @@ async def llm_usage(project_id: uuid.UUID, session: Session) -> dict[str, Any]:
     return await usage.project_spend(session, project_id)
 
 
-def _need_llm(p: Project) -> None:
-    if p.content_mode == "standard_sfw" and not os.environ.get("ANTHROPIC_API_KEY"):
+def _need_llm(p: Project, stage: str = "storyboard", tier: str | None = None) -> None:
+    from src.domains.gateway.routing import model_for
+    provider = model_for(stage, _tier(p, stage, tier)).provider
+    if p.content_mode == "standard_sfw" and provider == "anthropic" and not os.environ.get("ANTHROPIC_API_KEY"):
         raise HTTPException(503, "ANTHROPIC_API_KEY not configured on the server")
 
 
@@ -148,20 +152,33 @@ def _tier(p: Project, stage: str, explicit: str | None) -> str | None:
 async def stage_tiers() -> dict[str, dict[str, dict[str, str]]]:
     """Every stage that offers a draft/standard/high choice, for the frontend's quality dropdowns."""
     from src.domains.gateway import routing
-    return {s: routing.tiers_for(s) for s in routing.QUALITY_TIERS}
+    return {s: {t: {**option, "effective_model": routing.model_for(s, t).model,
+                    "effective_provider": routing.model_for(s, t).provider}
+                for t, option in routing.tiers_for(s).items()} for s in routing.QUALITY_TIERS}
 
 
 class QualityTiers(BaseModel):
     tiers: dict[str, str] = Field(default_factory=dict, description="stage -> draft|standard|high")
 
 
+@api.get("/projects/{project_id}/quality-tiers")
+async def get_quality_tiers(project_id: uuid.UUID, session: Session) -> dict[str, Any]:
+    p = await session.get(Project, project_id)
+    if p is None:
+        raise HTTPException(404, "project not found")
+    return {"tiers": (p.series_bible_json or {}).get("_quality_tiers") or {}}
+
+
 @api.put("/projects/{project_id}/quality-tiers")
 async def set_quality_tiers(project_id: uuid.UUID, body: QualityTiers, session: Session) -> dict[str, Any]:
     from src.domains.gateway import routing
-    bad = [s for s in body.tiers if s not in routing.STAGES]
+    bad = [s for s in body.tiers if s not in routing.QUALITY_TIERS]
     if bad:
         raise HTTPException(422, f"unknown stage: {bad[0]}")
-    p = await session.get(Project, project_id)
+    for stage, tier in body.tiers.items():
+        if tier not in routing.tiers_for(stage):
+            raise HTTPException(422, f"unsupported tier {tier} for stage {stage}")
+    p = await session.get(Project, project_id, with_for_update=True)
     if p is None:
         raise HTTPException(404, "project not found")
     p.series_bible_json = {**(p.series_bible_json or {}), "_quality_tiers": body.tiers}
@@ -308,8 +325,9 @@ async def plan_series(project_id: uuid.UUID, body: PlanRequest, session: Session
     existing = (await session.execute(select(Episode).where(Episode.project_id == project_id))).scalars().all()
     if existing and not body.replace:
         raise HTTPException(409, "episodes already planned; pass replace=true to re-plan")
-    _need_llm(p)
+    _need_llm(p, "plan", body.tier)
     mode, tier = p.content_mode, _tier(p, "plan", body.tier)
+    summarize_tier = _tier(p, "summarize", None)
     cache: dict[str, Any] = dict((p.series_bible_json or {}).get("_cache") or {})
     await session.close()
 
@@ -320,7 +338,7 @@ async def plan_series(project_id: uuid.UUID, body: PlanRequest, session: Session
         try:
             if series.needs_two_stage(segments):
                 plan = await _llm(series.two_stage_plan(llm, segments, body.episode_count, body.direction, mode,
-                                                        cache, progress, tier=tier))
+                                                        cache, progress, tier=tier, summarize_tier=summarize_tier))
             else:
                 await progress({"stage": "plan", "done": 0, "total": 1})
                 plan = await _llm(llm.structured(
@@ -338,7 +356,8 @@ async def plan_series(project_id: uuid.UUID, body: PlanRequest, session: Session
     async with session.begin():
         p = await session.get(Project, project_id, with_for_update=True)
         assert p is not None
-        p.series_bible_json = series.bible_from_plan(plan, {"_cache": cache, "_progress": done})
+        p.series_bible_json = series.bible_from_plan(
+            plan, {**(p.series_bible_json or {}), "_cache": cache, "_progress": done})
         p.status = "planned"
         await session.execute(delete(Episode).where(Episode.project_id == project_id))
         session.add_all([Episode(project_id=project_id, episode_number=o.episode_number, title=o.title,
@@ -404,14 +423,14 @@ async def import_script(project_id: uuid.UUID, body: ImportScriptRequest, sessio
     if not segments:
         raise HTTPException(422, "text is empty")
     if body.mode == "ai_format":
-        _need_llm(p)
-        mode = p.content_mode
+        _need_llm(p, "reformat")
+        mode, tier = p.content_mode, _tier(p, "reformat", None)
         await session.close()
         reformatted: list[str] = []
         async with _ledgered(project_id) as llm:
             for seg in segments:
                 out: EpisodeScript = await _llm(llm.structured(
-                    EpisodeScript, series.REFORMAT_RULES, {}, seg, mode, stage="reformat"))
+                    EpisodeScript, series.REFORMAT_RULES, {}, seg, mode, stage="reformat", tier=tier))
                 reformatted.append(out.script_text)
         segments = reformatted
     else:
@@ -465,7 +484,7 @@ async def write_script(project_id: uuid.UUID, n: int, session: Session,
     e = await _episode(session, project_id, n)
     prev = (await session.execute(select(Episode.synopsis).where(
         Episode.project_id == project_id, Episode.episode_number == n - 1))).scalar_one_or_none()
-    _need_llm(p)
+    _need_llm(p, "script", body.tier if body else None)
     segments = series.split_source(p.source_novel_text or "")
     prompt = series.script_prompt(episode_view(e), segments, prev)
     mode, bible, tier = p.content_mode, p.series_bible_json, _tier(p, "script", body.tier if body else None)
@@ -488,7 +507,7 @@ async def storyboard_episode(project_id: uuid.UUID, n: int, session: Session,
     if p is None:
         raise HTTPException(404, "project not found")
     e = await _episode(session, project_id, n)
-    _need_llm(p)
+    _need_llm(p, "storyboard", body.tier if body else None)
     text = e.script_text or f"第{n}集《{e.title}》大纲：{e.synopsis}"
     mode, bible = p.content_mode, p.series_bible_json
     tier = _tier(p, "storyboard", body.tier if body else None)

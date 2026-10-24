@@ -87,7 +87,7 @@ async def test_named_vendor_stage_goes_to_its_own_base_url(monkeypatch):
     llm = CachedDirectorLLM(client=make_claude(lambda r: (_ for _ in ()).throw(AssertionError("no Claude"))))
     out = await llm.structured(EpisodeScript, "R", {}, "x", stage="summarize")
     assert out.script_text == "场1"
-    assert seen["url"] == VENDOR_BASE_URL["zhipu"] + "/v1/chat/completions" and seen["auth"] == "Bearer zk"
+    assert seen["url"] == VENDOR_BASE_URL["zhipu"] + "/chat/completions" and seen["auth"] == "Bearer zk"
     assert llm.calls[0]["provider"] == "zhipu" and llm.calls[0]["model"] == "glm-5.3"
 
 

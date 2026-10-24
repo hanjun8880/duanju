@@ -72,7 +72,7 @@ function Workbench() {
       <main className="mx-auto max-w-[1400px] px-4 py-6 sm:px-8">
         {projects.error && <p className="mb-4 text-seal">后端未连接：{projects.error}。请先启动 apps/server（uvicorn src.main:app）。</p>}
         {tab === "source" && <ProjectImporter projects={projects.data ?? []} onChanged={() => { projects.reload(); me.reload(); }} />}
-        {tab === "script" && (current ? <ScriptRoom project={current} onChanged={projects.reload} /> : <NeedProject />)}
+        {tab === "script" && (current ? <ScriptRoom key={current.id} project={current} onChanged={projects.reload} /> : <NeedProject />)}
         {tab === "lookdev" && (current ? <LookdevStudio project={current} onSpent={me.reload} /> : <NeedProject />)}
         {tab === "storyboard" && (current ? (
           <>
