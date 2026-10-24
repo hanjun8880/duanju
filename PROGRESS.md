@@ -326,7 +326,8 @@ Victor 嫌 Claude 贵、担心中文效果，拉了"七个专家窗口"按岗位
 | 可灵(keling) 视频适配器占位：`model_catalog` 行 `is_active=false`，没有 `KELING_API_KEY` 时 `ProviderNotConfigured`，和 wan/minimax 的占位模式一致 | PASS | `adapters/keling.py` |
 | migration `0010_vendor_lineup`：新增 `seedance_2_0_mini`(_draft)、`seedream_5_flash`、`wan2_2_i2v_flash`、`keling_4_0`（inactive）；`seedream_5_pro` 单价从占位 0.03 改成 Victor 核实的 0.30 元/张 ≈ 0.0417 美元 | VERIFIED | `alembic upgrade head` 在空库跑通；`test_schema_and_seed.py`、`test_ledger_money.py` |
 | 定妆纯文生图标记 + 30 天有效期：`on_lookdev_rendered(..., pure_t2i=)` 把没有图片参考的渲染打上 `meta.ref_meta[url] = {pure_t2i, expires_at}`；`lookdev/refs.py` 的 `refs_for_episode` 过滤掉过期的 | PASS | `test_lookdev.py::test_pure_t2i_ref_expires_and_is_dropped_from_refs_for_episode` |
-| 真实供应商校准（只各打一次，按要求不多出）：Seedream 5.0 pro 文生图成功（2496×1664，usage.output_tokens=16224）；Seedance 2.0 mini 5 秒视频被方舟内容策略判定 `OutputVideoSensitiveContentDetected.PolicyViolation` 拒绝（和价格无关），没有重试 | VERIFIED（图）/ BLOCKED（视频，内容策略，非供应商问题） | 本轮会话记录；没有留存密钥/日志 |
+| 真实供应商校准（只各打一次，按要求不多出）：Seedream 5.0 pro 文生图成功（2496×1664，usage.output_tokens=16224）；Seedance 2.0 mini 5 秒视频首次被方舟内容策略判定 `OutputVideoSensitiveContentDetected.PolicyViolation` 拒绝（和价格无关） | VERIFIED（图）/ 见下一行（视频，已用安全提示词重跑） | 本轮会话记录；没有留存密钥/日志 |
+| 视频二次校准（2026-10-24，换成"橙色卡通小猫在木地板打滚"这种无真人/无版权敏感内容的提示词，480p/5秒/doubao-seedance-2-0-mini-260615）：成功出片，`usage.completion_tokens=50638`，耗时约 85 秒（提交到 succeeded） | VERIFIED | 任务 id `cgt-20261024093053-d9khv`；没有拿到官方按 token 计价的价目页，无法独立换算成人民币单价，只能对照 Victor 口述的 480p 草稿价 ~1.2 元/5秒 作参考 |
 | 顺带修正：之前按专家口述写的几个 Ark 模型 id 是猜的，`GET /models` 核对账号真实可用 id 后全部改成真实值（如 `doubao-seedance-2-0-mini-260615`、`doubao-seedream-5-0-flash-260915`、`doubao-seed-2-1-lite-260915`） | VERIFIED | 同上 |
 
 后端 258 passed（新增 1 项 `test_lookdev`，`test_llm_routing` 新增 2 项抵消了同名旧文件的基线差）；`ruff`、`mypy`（53 个源文件）通过。
